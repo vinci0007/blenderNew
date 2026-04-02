@@ -1,0 +1,9 @@
+{
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "YOUR_API_KEY",
+  "model": "gpt-4o-mini",
+  "temperature": 0.2,
+  "chat_completions_path": "/v1/chat/completions",
+  "use_response_format_json_object": true
+}
+

@@ -1,0 +1,12 @@
+[project]
+name = "vibe-blender-flow"
+version = "0.1.0"
+description = "Vibe-Blender-Flow: natural-language atomic modeling via Blender skills"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "websockets",
+]
+
+[project.scripts]
+vbf = "vbf.cli:main"
