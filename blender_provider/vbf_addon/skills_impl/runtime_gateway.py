@@ -1,13 +1,13 @@
 from typing import Any, Dict, List
 
 import bpy  # type: ignore
-import importlib
 
-
-_rt = importlib.import_module("blender_provider.vbf_addon.skill_runtime")
-py_get = getattr(_rt, "py_get")
-py_set = getattr(_rt, "py_set")
-py_call = getattr(_rt, "py_call")
+try:
+    # Standard: installed as standalone addon folder (vbf_addon/skill_runtime)
+    from ..skill_runtime import py_call, py_get, py_set
+except ImportError:
+    # Fallback: Blender loads the folder as a plain script (no package context)
+    from skill_runtime import py_call, py_get, py_set  # type: ignore
 
 
 def _resolve_operator(operator_id: str):
