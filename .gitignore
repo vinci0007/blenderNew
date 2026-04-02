@@ -11,3 +11,5 @@ wheels/
 .vscode
 /.vscode
 .references
+/.kiro
+/.hypothesis

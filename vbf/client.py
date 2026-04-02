@@ -206,7 +206,21 @@ class VBFClient:
         skills = data.get("skills") or []
         return skills if isinstance(skills, list) else []
 
-    def _build_skill_plan_messages(self, prompt: str, allowed_skills: List[str]) -> List[Dict[str, str]]:
+    async def describe_skills(self, skill_names: List[str]) -> Optional[Dict[str, Any]]:
+        """
+        Ask Blender addon for skill parameter schemas.
+        Returns None if addon doesn't support vbf.describe_skills (fallback).
+        """
+        try:
+            resp = await self._ws.call(method="vbf.describe_skills", params={"skill_names": skill_names})
+            if not isinstance(resp, dict):
+                return None
+            data = resp.get("data") or {}
+            return data.get("skills") or None
+        except Exception:
+            return None
+
+    def _build_skill_plan_messages(self, prompt: str, allowed_skills: List[str], skill_schemas: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
         # Generic plan schema for user-controlled modeling.
         schema = {
             "vbf_version": "string",
@@ -220,7 +234,7 @@ class VBFClient:
             "steps": [
                 {
                     "step_id": "string",
-                    "stage": "discover|blockout|detail|material|finalize",
+                    "stage": "discover|blockout|boolean|detail|bevel|normal_fix|accessories|material|finalize",
                     "skill": "string",
                     "args": {"any": "json-serializable"},
                     "on_success": {
@@ -236,7 +250,10 @@ class VBFClient:
         user = {
             "prompt": prompt,
             "task_type": "user_modeling_task",
-            "allowed_skills": allowed_skills,
+            "allowed_skills": [
+                {"name": name, **skill_schemas[name]} if skill_schemas is not None and name in skill_schemas else {"name": name}
+                for name in allowed_skills
+            ] if skill_schemas is not None else allowed_skills,
             "skills_plan_schema": schema,
             "must_return_only_json": True,
             "instructions": [
@@ -248,7 +265,7 @@ class VBFClient:
                 "If the stored value is not an object/dict, reference it as {\"$ref\":\"<alias_name>.data.value\"}.",
                 "Prefer coordinate alignment by using move_object_anchor_to_point rather than doing arithmetic in $ref.",
                 "For unknown operators, first use ops_search; then use ops_introspect on candidate operator_id; then call ops_invoke.",
-                "Stage order must be monotonic: discover -> blockout -> detail -> material -> finalize.",
+                "Stage order must be monotonic: discover -> blockout -> boolean -> detail -> bevel -> normal_fix -> accessories -> material -> finalize.",
             ],
         }
 
@@ -271,6 +288,7 @@ class VBFClient:
         original_plan: Dict[str, Any],
         step_results: Dict[str, Dict[str, Any]],
         allowed_skills: List[str],
+        skill_schemas: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, str]]:
         schema = {
             "vbf_version": "string",
@@ -288,7 +306,10 @@ class VBFClient:
             "failed_step_id": failed_step_id,
             "error_message": error_message,
             "error_traceback": error_traceback,
-            "allowed_skills": allowed_skills,
+            "allowed_skills": [
+                {"name": name, **skill_schemas[name]} if skill_schemas is not None and name in skill_schemas else {"name": name}
+                for name in allowed_skills
+            ] if skill_schemas is not None else allowed_skills,
             "original_plan": {"plan_id": original_plan.get("plan_id"), "steps": original_plan.get("steps")},
             "executed_step_outputs": compact_steps,
             "repair_plan_schema": schema,
@@ -320,7 +341,8 @@ class VBFClient:
             # fallback: deterministic radio-like demo
             return {}, self._deterministic_radio_steps()
 
-        messages = self._build_skill_plan_messages(prompt, allowed_skills)
+        skill_schemas = await self.describe_skills(allowed_skills)
+        messages = self._build_skill_plan_messages(prompt, allowed_skills, skill_schemas=skill_schemas)
         plan = await self._llm_json(llm, messages)
         if not isinstance(plan, dict) or "steps" not in plan:
             raise ValueError("LLM plan missing 'steps'")
@@ -607,6 +629,10 @@ class VBFClient:
 
         plan, steps = await self._plan_skill_task(prompt, allowed_skills)
 
+        # Fetch skill schemas for repair messages (same call as inside _plan_skill_task,
+        # but we need the result here for repair context).
+        skill_schemas = await self.describe_skills(allowed_skills)
+
         max_retries_per_step = 2
         try:
             max_retries_per_step = int(plan.get("execution", {}).get("max_retries_per_step", 2))
@@ -621,7 +647,17 @@ class VBFClient:
         step_results: Dict[str, Dict[str, Any]] = {}
         attempt_counts: Dict[str, int] = {}
         introspected_ops: set[str] = set()
-        stage_order = {"discover": 0, "blockout": 1, "detail": 2, "material": 3, "finalize": 4}
+        stage_order = {
+            "discover": 0,
+            "blockout": 1,
+            "boolean": 2,
+            "detail": 3,
+            "bevel": 4,
+            "normal_fix": 5,
+            "accessories": 6,
+            "material": 7,
+            "finalize": 8,
+        }
         current_stage_rank = -1
 
         i = 0
@@ -718,6 +754,7 @@ class VBFClient:
                     original_plan=plan,
                     step_results=step_results,
                     allowed_skills=allowed_skills,
+                    skill_schemas=skill_schemas,
                 )
 
                 repair_plan = await self._llm_json(llm, repair_messages)
@@ -748,6 +785,7 @@ class VBFClient:
                     original_plan=plan,
                     step_results=step_results,
                     allowed_skills=allowed_skills,
+                    skill_schemas=skill_schemas,
                 )
 
                 repair_plan = await self._llm_json(llm, repair_messages)

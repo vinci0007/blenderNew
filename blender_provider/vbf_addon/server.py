@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import queue
 import threading
@@ -20,6 +21,20 @@ except Exception:  # pragma: no cover
 
 HOST_ENV = "VBF_WS_HOST"
 PORT_ENV = "VBF_WS_PORT"
+
+
+def _extract_skill_schema(fn) -> dict:
+    sig = inspect.signature(fn)
+    doc = inspect.getdoc(fn) or ""
+    args = {}
+    for param_name, param in sig.parameters.items():
+        args[param_name] = {
+            "required": param.default is inspect.Parameter.empty,
+            "default": None if param.default is inspect.Parameter.empty else repr(param.default),
+            "type": str(param.annotation) if param.annotation is not inspect.Parameter.empty else "any",
+        }
+    first_line = doc.split("\n")[0].strip() if doc else ""
+    return {"description": first_line, "args": args, "doc": doc}
 
 
 @dataclass
@@ -96,6 +111,20 @@ class VBFWebSocketServer:
                         "jsonrpc": "2.0",
                         "id": req_id,
                         "result": {"ok": True, "data": {"skills": sorted(list(SKILL_REGISTRY.keys()))}},
+                    }
+                    await websocket.send(json.dumps(resp))
+                    continue
+
+                if method == "vbf.describe_skills":
+                    skill_names = params.get("skill_names") if isinstance(params, dict) else None
+                    registry = SKILL_REGISTRY
+                    if skill_names and isinstance(skill_names, list):
+                        registry = {k: v for k, v in SKILL_REGISTRY.items() if k in skill_names}
+                    schemas = {name: _extract_skill_schema(fn) for name, fn in registry.items()}
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"ok": True, "data": {"skills": schemas}},
                     }
                     await websocket.send(json.dumps(resp))
                     continue

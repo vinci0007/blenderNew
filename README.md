@@ -94,7 +94,7 @@ LLM 生成的 JSON 只包含 skill 名称与 args，不会输出任何 `bpy`/`bm
   "steps": [
     {
       "step_id": "s1",
-      "stage": "discover|blockout|detail|material|finalize",
+      "stage": "discover|blockout|boolean|detail|bevel|normal_fix|accessories|material|finalize",
       "skill": "ops_search",
       "args": { "query": "cube add" }
     }
@@ -103,7 +103,7 @@ LLM 生成的 JSON 只包含 skill 名称与 args，不会输出任何 `bpy`/`bm
 ```
 
 执行器会强制：
-- 阶段顺序不能倒退：`discover -> blockout -> detail -> material -> finalize`
+- 阶段顺序不能倒退：`discover -> blockout -> boolean -> detail -> bevel -> normal_fix -> accessories -> material -> finalize`
 - `ops_invoke` 前必须先有对应 `ops_introspect`
 - `py_call/py_set` 默认禁用（除非 `allow_low_level_gateway=true`）
 

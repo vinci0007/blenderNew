@@ -12,6 +12,21 @@ def boolean_tool(
     apply: bool = True,
     delete_tool: bool = True,
 ) -> Dict[str, Any]:
+    """Apply a boolean modifier from one mesh object onto another.
+
+    Args:
+        target_name: Name of the target (base) object that receives the modifier.
+        tool_name: Name of the tool object used as the boolean operand.
+        operation: Boolean operation to perform. Enum: "difference" | "union" | "intersect".
+            Defaults to "difference".
+        apply: If True (default), the modifier is applied immediately so the result is
+            baked into the mesh. If False, the modifier is added but left unapplied.
+        delete_tool: If True (default), the tool object is removed from the scene after
+            the operation. Set to False to keep it.
+
+    Returns:
+        {"object_name": str} — the name of the target object after the operation.
+    """
     try:
         target = bpy.data.objects.get(target_name)
         tool = bpy.data.objects.get(tool_name)
@@ -43,6 +58,17 @@ def boolean_tool(
 
 
 def join_objects(object_names: List[str], new_name: str | None = None) -> Dict[str, Any]:
+    """Merge multiple mesh objects into a single object.
+
+    Args:
+        object_names: List of object names to merge. All objects must exist in the scene.
+            The first object in the list becomes the active (base) object for the join.
+        new_name: Optional name for the resulting merged object. If omitted, the result
+            keeps the name of the first object in `object_names`.
+
+    Returns:
+        {"object_name": str} — the name of the merged object.
+    """
     try:
         if not object_names:
             raise ValueError("object_names is empty")

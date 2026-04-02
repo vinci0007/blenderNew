@@ -7,6 +7,19 @@ from .utils import fmt_err
 
 
 def spatial_query(object_name: str, query_type: str) -> Dict[str, Any]:
+    """Query a spatial point on an object's bounding box in world coordinates.
+
+    Args:
+        object_name: Name of the Blender object to query.
+        query_type: Which point to return. Enum:
+            - "top_center": center of the top (max-Z) face.
+            - "bottom_center": center of the bottom (min-Z) face.
+            - "side_center": center of the side (max-X) face.
+            - "center": geometric center of the bounding box.
+
+    Returns:
+        {"location": [x, y, z]} — world-space coordinates of the queried point.
+    """
     try:
         obj = bpy.data.objects.get(object_name)
         if not obj:

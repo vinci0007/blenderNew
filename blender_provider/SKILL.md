@@ -35,6 +35,7 @@ metadata:
   "steps": [
     {
       "step_id": "string",
+      "stage": "discover|blockout|boolean|detail|bevel|normal_fix|accessories|material|finalize",
       "skill": "string",
       "args": { "any": "json-serializable" },
       "on_success": {

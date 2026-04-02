@@ -12,6 +12,25 @@ def move_object_anchor_to_point(
     anchor_type: str,
     target_point: List[float],
 ) -> Dict[str, Any]:
+    """Move an object so that a specific anchor point aligns with a target world position.
+
+    The object is translated by the delta between its current anchor location and the
+    target point. Only objects with no parent are supported.
+
+    Args:
+        object_name: Name of the object to move. Must have no parent object.
+        anchor_type: Which point on the object to use as the anchor. Enum (same as
+            spatial_query query_type):
+            - "top_center": center of the top (max-Z) face.
+            - "bottom_center": center of the bottom (min-Z) face.
+            - "side_center": center of the side (max-X) face.
+            - "center": geometric center of the bounding box.
+        target_point: [x, y, z] world-space position to move the anchor to.
+
+    Returns:
+        {"object_name": str, "moved_by": [dx, dy, dz]} — the object name and the
+        translation vector applied.
+    """
     try:
         obj = bpy.data.objects.get(object_name)
         if not obj:

@@ -15,6 +15,24 @@ def create_nested_cones(
     height: float = 0.24,
     z_jitter: float = 0.0,
 ) -> Dict[str, Any]:
+    """Create a set of nested, progressively smaller cones joined into one object.
+
+    Each layer is a cone whose radius interpolates linearly from `base_radius` (layer 0)
+    to `top_radius` (last layer). All cones are joined into a single mesh.
+
+    Args:
+        name_prefix: Prefix used for intermediate cone names and the final joined object name.
+        base_location: [x, y, z] world-space position for the base of the cone stack.
+        layers: Number of nested cone layers to create. Defaults to 4.
+        base_radius: Radius of the outermost (bottom) cone. Defaults to 0.06.
+        top_radius: Radius of the innermost (top) cone. Defaults to 0.006.
+        height: Height of the base cone. Inner cones are slightly shorter. Defaults to 0.24.
+        z_jitter: Z-axis offset applied per layer index (layer_i * z_jitter). Use 0.0 (default)
+            to stack all cones at the same base Z. Positive values spread layers upward.
+
+    Returns:
+        {"object_name": str} — the name of the final joined cone object.
+    """
     try:
         ensure_object_mode()
         base_loc = mathutils.Vector(vec3(base_location))

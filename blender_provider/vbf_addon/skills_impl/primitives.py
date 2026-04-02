@@ -15,6 +15,26 @@ def create_primitive(
     radius: float | None = None,
     height: float | None = None,
 ) -> Dict[str, Any]:
+    """Create a mesh primitive object in the scene.
+
+    Args:
+        primitive_type: Type of primitive to create. Enum: "cube" | "cylinder" | "cone" | "sphere".
+        name: Name to assign to the created object.
+        location: [x, y, z] world-space position for the object origin.
+        rotation_euler: Optional [rx, ry, rz] rotation in radians. Defaults to [0, 0, 0].
+        scale: Optional [sx, sy, sz] scale applied after creation.
+        size: Shorthand dimensions — meaning differs per type:
+            - cube: [x, y, z] sets object dimensions directly.
+            - cylinder: [radius, height].
+            - cone: [radius1, radius2, height].
+            - sphere: [radius].
+            Mutually exclusive with `radius`/`height`; if both are given, `radius`/`height` take precedence.
+        radius: Explicit radius (cylinder/cone/sphere). Overrides size[0] when provided.
+        height: Explicit height (cylinder/cone). Overrides size[-1] when provided.
+
+    Returns:
+        {"object_name": str} — the name of the created Blender object.
+    """
     try:
         ensure_object_mode()
         loc = vec3(location)
@@ -55,4 +75,3 @@ def create_primitive(
         return {"object_name": new_obj.name}
     except Exception as e:
         raise fmt_err("create_primitive failed", e)
-

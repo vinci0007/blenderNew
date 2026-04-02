@@ -11,6 +11,19 @@ def create_material_simple(
     roughness: float = 0.4,
     metallic: float = 0.0,
 ) -> Dict[str, Any]:
+    """Create or update a Principled BSDF material with basic PBR properties.
+
+    If a material with the given name already exists it is updated in place.
+
+    Args:
+        name: Name of the material to create or update.
+        base_color: [r, g, b] color values in linear space (0.0–1.0 each).
+        roughness: Surface roughness (0.0 = mirror, 1.0 = fully diffuse). Defaults to 0.4.
+        metallic: Metallic factor (0.0 = dielectric, 1.0 = fully metallic). Defaults to 0.0.
+
+    Returns:
+        {"material_name": str} — the name of the created/updated material.
+    """
     try:
         mat = bpy.data.materials.get(name)
         if mat is None:
@@ -38,6 +51,17 @@ def create_material_simple(
 
 
 def assign_material(object_name: str, material_name: str, slot_index: int = 0) -> Dict[str, Any]:
+    """Assign an existing material to a material slot on an object.
+
+    Args:
+        object_name: Name of the mesh object to assign the material to.
+        material_name: Name of the material to assign (must already exist).
+        slot_index: Material slot index to assign to. Slots are created automatically
+            if the object has fewer slots than required. Defaults to 0.
+
+    Returns:
+        {"object_name": str, "material_name": str, "slot_index": int}.
+    """
     try:
         obj = bpy.data.objects.get(object_name)
         if not obj:

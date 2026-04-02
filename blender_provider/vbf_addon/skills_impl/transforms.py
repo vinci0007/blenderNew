@@ -12,6 +12,20 @@ def apply_transform(
     rotation_euler: List[float] | None = None,
     scale: List[float] | None = None,
 ) -> Dict[str, Any]:
+    """Set the location, rotation, and/or scale of an object.
+
+    At least one of `location`, `rotation_euler`, or `scale` must be provided.
+    Only the supplied parameters are modified; omitted ones are left unchanged.
+
+    Args:
+        object_name: Name of the object to transform.
+        location: Optional [x, y, z] world-space position to set.
+        rotation_euler: Optional [rx, ry, rz] rotation in radians (XYZ Euler order).
+        scale: Optional [sx, sy, sz] scale factors.
+
+    Returns:
+        {"object_name": str} — the name of the transformed object.
+    """
     try:
         obj = bpy.data.objects.get(object_name)
         if not obj:
@@ -28,4 +42,3 @@ def apply_transform(
         return {"object_name": obj.name}
     except Exception as e:
         raise fmt_err("apply_transform failed", e)
-

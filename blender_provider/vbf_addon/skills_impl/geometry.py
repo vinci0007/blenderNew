@@ -13,6 +13,18 @@ def create_beveled_box(
     bevel_width: float = 0.03,
     bevel_segments: int = 3,
 ) -> Dict[str, Any]:
+    """Create a cube with a bevel modifier applied for rounded edges.
+
+    Args:
+        name: Name to assign to the created object.
+        size: [x, y, z] dimensions of the box.
+        location: [x, y, z] world-space position for the object origin.
+        bevel_width: Width of the bevel in Blender units. Defaults to 0.03.
+        bevel_segments: Number of bevel loop cuts (higher = smoother). Defaults to 3.
+
+    Returns:
+        {"object_name": str} — the name of the created beveled box object.
+    """
     try:
         obj = create_primitive(
             primitive_type="cube",
@@ -32,4 +44,3 @@ def create_beveled_box(
         return {"object_name": target.name}
     except Exception as e:
         raise fmt_err("create_beveled_box failed", e)
-

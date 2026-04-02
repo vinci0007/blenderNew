@@ -10,3 +10,9 @@ dependencies = [
 
 [project.scripts]
 vbf = "vbf.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.151.10",
+    "pytest>=9.0.2",
+]
