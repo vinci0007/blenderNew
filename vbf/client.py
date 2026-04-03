@@ -633,27 +633,26 @@ class VBFClient:
 
         # Check LLM availability upfront — do NOT silently fall back to radio demo.
         if not self._llm_enabled():
-            print("[VBF] LLM is not configured or disabled (use_llm=false). "
-                  "Set VBF_LLM_BASE_URL/API_KEY/MODEL or configure vbf/config/llm.json to enable LLM modeling.")
-            print("[VBF] Falling back to deterministic RadioTask demo.")
+            print("[VBF] LLM not configured or disabled. Set VBF_LLM_BASE_URL/API_KEY/MODEL or vbf/config/llm.json.")
+            print("[VBF] Falling back to RadioTask demo.")
             return await self.run_radio_task(prompt)
 
         allowed_skills = await self.list_skills()
         if not allowed_skills:
-            print("[VBF] Blender addon did not return any skills. Falling back to RadioTask demo.")
+            print("[VBF] No skills returned from Blender addon. Falling back to RadioTask demo.")
             return await self.run_radio_task(prompt)
 
         llm = self._load_llm()
         # llm should not be None here since _llm_enabled() passed, but guard anyway.
         if llm is None:
-            print("[VBF] LLM config loaded but client failed to initialize. Falling back to RadioTask demo.")
+            print("[VBF] LLM init failed. Falling back to RadioTask demo.")
             return await self.run_radio_task(prompt)
 
         _save_path = save_state_path or os.path.join(os.path.dirname(__file__), "config", "task_state.json")
 
         # --- Resume from saved state ---
         if resume_state_path and os.path.exists(resume_state_path):
-            print(f"[VBF] Resuming task from saved state: {resume_state_path}")
+            print(f"[VBF] Resuming from: {resume_state_path}")
             saved = TaskState.load(resume_state_path)
             plan = saved.plan
             steps = saved.steps
@@ -661,15 +660,13 @@ class VBFClient:
             start_index = saved.current_step_index
             allowed_skills = saved.allowed_skills
             skill_schemas = saved.skill_schemas
-            print(f"[VBF] Resuming from step index {start_index} / {len(steps)} "
-                  f"(completed: {list(step_results.keys())})")
+            print(f"[VBF] Step {start_index}/{len(steps)}, completed: {list(step_results.keys())}")
         else:
             skill_schemas = await self.describe_skills(allowed_skills)
             try:
                 plan, steps = await self._plan_skill_task(prompt, allowed_skills)
             except LLMError as e:
                 print(f"[VBF] LLM planning failed: {e}")
-                print(f"[VBF] Task interrupted. No state to save (planning did not start).")
                 raise
             step_results: Dict[str, Dict[str, Any]] = {}
             start_index = 0
@@ -797,21 +794,9 @@ class VBFClient:
                     )
                     repair_plan = await self._llm_json(llm, repair_messages)
                 except LLMError as llm_err:
-                    # LLM failed during repair — save state and interrupt.
-                    state = TaskState(
-                        prompt=prompt, plan=plan, steps=steps,
-                        step_results=step_results, current_step_index=i,
-                        allowed_skills=allowed_skills, skill_schemas=skill_schemas,
-                    )
-                    state.save(_save_path)
-                    print(f"[VBF] LLM repair call failed: {llm_err}")
-                    print(f"[VBF] Task interrupted at step '{step_id}' (index {i}). "
-                          f"State saved to: {_save_path}")
-                    print(f"[VBF] Resume with: client.run_task(prompt, resume_state_path='{_save_path}')")
-                    raise TaskInterruptedError(
-                        f"LLM repair failed at step '{step_id}': {llm_err}",
-                        state=state,
-                        state_path=_save_path,
+                    raise self._interrupt(
+                        "LLM repair failed", step_id, i, _save_path,
+                        prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
                     ) from llm_err
 
                 if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
@@ -828,21 +813,9 @@ class VBFClient:
                 steps = steps[:i] + repair_steps
 
             except LLMError as llm_err:
-                # LLM failed mid-execution — save state and interrupt.
-                state = TaskState(
-                    prompt=prompt, plan=plan, steps=steps,
-                    step_results=step_results, current_step_index=i,
-                    allowed_skills=allowed_skills, skill_schemas=skill_schemas,
-                )
-                state.save(_save_path)
-                print(f"[VBF] LLM call failed: {llm_err}")
-                print(f"[VBF] Task interrupted at step '{step_id}' (index {i}). "
-                      f"State saved to: {_save_path}")
-                print(f"[VBF] Resume with: client.run_task(prompt, resume_state_path='{_save_path}')")
-                raise TaskInterruptedError(
-                    f"LLM failed at step '{step_id}': {llm_err}",
-                    state=state,
-                    state_path=_save_path,
+                raise self._interrupt(
+                    "LLM failed", step_id, i, _save_path,
+                    prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
                 ) from llm_err
 
             except Exception as e:
@@ -865,20 +838,9 @@ class VBFClient:
                     )
                     repair_plan = await self._llm_json(llm, repair_messages)
                 except LLMError as llm_err:
-                    state = TaskState(
-                        prompt=prompt, plan=plan, steps=steps,
-                        step_results=step_results, current_step_index=i,
-                        allowed_skills=allowed_skills, skill_schemas=skill_schemas,
-                    )
-                    state.save(_save_path)
-                    print(f"[VBF] LLM repair call failed: {llm_err}")
-                    print(f"[VBF] Task interrupted at step '{step_id}' (index {i}). "
-                          f"State saved to: {_save_path}")
-                    print(f"[VBF] Resume with: client.run_task(prompt, resume_state_path='{_save_path}')")
-                    raise TaskInterruptedError(
-                        f"LLM repair failed at step '{step_id}': {llm_err}",
-                        state=state,
-                        state_path=_save_path,
+                    raise self._interrupt(
+                        "LLM repair failed", step_id, i, _save_path,
+                        prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
                     ) from llm_err
 
                 if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
@@ -1070,6 +1032,31 @@ class VBFClient:
                 steps = steps[:i] + repair_steps
 
         return {"prompt": prompt, "step_results": step_results, "plan": plan}
+
+    def _interrupt(
+        self,
+        reason: str,
+        step_id: str,
+        step_index: int,
+        save_path: str,
+        prompt: str,
+        plan: Dict[str, Any],
+        steps: List[Dict[str, Any]],
+        step_results: Dict[str, Dict[str, Any]],
+        allowed_skills: List[str],
+        skill_schemas: Optional[Dict[str, Any]],
+        cause: Exception,
+    ) -> "TaskInterruptedError":
+        state = TaskState(
+            prompt=prompt, plan=plan, steps=steps,
+            step_results=step_results, current_step_index=step_index,
+            allowed_skills=allowed_skills, skill_schemas=skill_schemas,
+        )
+        state.save(save_path)
+        print(f"[VBF] {reason}: {cause}")
+        print(f"[VBF] Interrupted at step '{step_id}'. State saved: {save_path}")
+        print(f"[VBF] Resume: vbf --prompt \"{prompt}\" --resume \"{save_path}\"")
+        return TaskInterruptedError(f"{reason} at step '{step_id}': {cause}", state=state, state_path=save_path)
 
     async def _start_blender_headless(self) -> None:
         # Start Blender process. Controller is responsible for lifecycle.

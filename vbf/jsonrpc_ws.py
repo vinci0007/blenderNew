@@ -19,11 +19,7 @@ class JsonRpcError(Exception):
 
 
 class JsonRpcWebSocketClient:
-    """
-    Minimal JSON-RPC 2.0 over WebSocket client.
-    - One recv loop
-    - Pending futures keyed by `id`
-    """
+    """Minimal JSON-RPC 2.0 over WebSocket client with a single recv loop."""
 
     def __init__(self, uri: str):
         self._uri = uri
