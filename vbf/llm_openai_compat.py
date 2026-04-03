@@ -38,6 +38,7 @@ class OpenAICompatConfig:
     temperature: float = 0.2
     chat_completions_path: str = "/v1/chat/completions"
     use_response_format_json_object: bool = True
+    use_llm: bool = True  # Set to false to disable LLM and always use deterministic fallback
 
 
 def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[OpenAICompatConfig]:
@@ -63,6 +64,7 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
             temperature=float(os.getenv("VBF_LLM_TEMPERATURE", "0.2")),
             chat_completions_path=os.getenv("VBF_LLM_CHAT_COMPLETIONS_PATH", "/v1/chat/completions"),
             use_response_format_json_object=os.getenv("VBF_LLM_JSON_OBJECT", "1") != "0",
+            use_llm=os.getenv("VBF_LLM_ENABLED", "1") != "0",
         )
 
     if not config_path:
@@ -97,6 +99,7 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
         temperature=float(data.get("temperature", 0.2)),
         chat_completions_path=data.get("chat_completions_path", "/v1/chat/completions"),
         use_response_format_json_object=bool(data.get("use_response_format_json_object", True)),
+        use_llm=bool(data.get("use_llm", True)),
     )
 
 

@@ -1,23 +1,12 @@
 import copy
-from typing import Any, Dict, List, Tuple
-
-
-def _walk(obj: Any):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield ("dict", k, v)
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield ("list", i, v)
+from typing import Any, Dict
 
 
 def resolve_refs_in_value(value: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
     """
-    Resolve {"$ref": "step_id.data.location"} into actual values from step_results.
+    Resolve {"$ref": "step_id.data.key"} into actual values from step_results.
 
-    Supported ref roots:
-    - "<step_id>.data.<key>" (canonical; matches Blender return: {"ok": ..., "data": {...}})
-    - "<step_id>.result.<key>" (alias for data.<key> for convenience)
+    Supported roots: "data" (canonical) and "result" (alias for data).
     """
     if isinstance(value, dict) and set(value.keys()) == {"$ref"}:
         ref = value["$ref"]
@@ -57,9 +46,7 @@ def resolve_refs_in_value(value: Any, step_results: Dict[str, Dict[str, Any]]) -
 
 
 def resolve_refs(args: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
-    """
-    Recursively resolve refs in nested dict/list structures.
-    """
+    """Recursively resolve $ref tokens in nested dict/list structures."""
     args_copy = copy.deepcopy(args)
 
     def rec(x: Any) -> Any:
@@ -78,9 +65,7 @@ def resolve_refs(args: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
 
 
 def merge_step_results_for_prompt(step_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Provide compact step context to LLM.
-    """
+    """Compact step results for inclusion in LLM repair prompts."""
     compact: Dict[str, Any] = {}
     for step_id, payload in step_results.items():
         if payload.get("ok") is True:
