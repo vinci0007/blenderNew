@@ -5,9 +5,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .jsonrpc_ws import JsonRpcWebSocketClient
 from .jsonrpc_ws import JsonRpcError
-from .llm_openai_compat import OpenAICompatLLM, load_openai_compat_config, LLMError
+from .llm_openai_compat import OpenAICompatLLM, OpenAICompatConfig, load_openai_compat_config, LLMError
 from .vibe_protocol import resolve_refs, merge_step_results_for_prompt
 from .task_state import TaskState, TaskInterruptedError
+
+
+def _find_replace_idx(steps: list, replace_from_step_id: str) -> int:
+    """Find the index of replace_from_step_id in steps.
+
+    Raises ValueError if not found.
+    """
+    for idx, s in enumerate(steps):
+        if s.get("step_id") == replace_from_step_id:
+            return idx
+    raise ValueError(f"LLM repair replace_from_step_id not found: {replace_from_step_id}")
 
 
 class VBFClient:
@@ -79,6 +90,10 @@ class VBFClient:
         if not cfg.use_llm:
             return None
         return OpenAICompatLLM(cfg)
+
+    def _load_llm_config(self) -> Optional["OpenAICompatConfig"]:
+        """Return the raw OpenAICompatConfig (or None if not configured)."""
+        return load_openai_compat_config()
 
     def _llm_enabled(self) -> bool:
         """Return True if LLM is configured AND use_llm is not disabled."""
@@ -300,6 +315,7 @@ class VBFClient:
         step_results: Dict[str, Dict[str, Any]],
         allowed_skills: List[str],
         skill_schemas: Optional[Dict[str, Any]] = None,
+        low_level_gateway_hint: bool = False,
     ) -> List[Dict[str, str]]:
         schema = {
             "vbf_version": "string",
@@ -333,6 +349,11 @@ class VBFClient:
                 "Use $ref wherever you need coordinates/object names from previous successful steps.",
             ],
         }
+        if low_level_gateway_hint:
+            user["instructions"].append(
+                "py_call and py_set are now available as low-level gateway skills; "
+                "use them only if high-level skills cannot fulfill the requirement"
+            )
         system_msg = (
             "You are the Vibe Protocol auto-repair planner. "
             "You MUST return JSON only that matches the provided repair_plan_schema exactly."
@@ -679,7 +700,11 @@ class VBFClient:
 
         controls = plan.get("controls", {}) if isinstance(plan, dict) else {}
         max_steps = int(controls.get("max_steps", 80)) if isinstance(controls, dict) else 80
-        allow_low_level_gateway = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
+        _llm_cfg = self._load_llm_config()
+        _config_allow = _llm_cfg.allow_low_level_gateway if _llm_cfg else False
+        _config_auto = _llm_cfg.auto_allow_low_level_gateway if _llm_cfg else True
+        _plan_allow = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
+        allow_low_level_gateway = _config_allow or _plan_allow
         require_ops_introspect = bool(controls.get("require_ops_introspect_before_invoke", True)) if isinstance(controls, dict) else True
 
         attempt_counts: Dict[str, int] = {}
@@ -725,10 +750,59 @@ class VBFClient:
                 )
 
             if skill in {"py_call", "py_set"} and not allow_low_level_gateway:
-                raise ValueError(
-                    f"Skill {skill} is blocked by controls.allow_low_level_gateway=false. "
-                    "Use high-level skills / ops_* first."
-                )
+                if _config_auto:
+                    # Auto-downgrade: record blocked entry and trigger LLM repair with gateway hint
+                    step_results[step_id] = {
+                        "ok": False,
+                        "error": {
+                            "message": "blocked: low-level gateway not allowed, triggering auto-downgrade repair"
+                        },
+                    }
+                    repair_skills = list(allowed_skills)
+                    if "py_call" not in repair_skills:
+                        repair_skills.append("py_call")
+                    if "py_set" not in repair_skills:
+                        repair_skills.append("py_set")
+                    try:
+                        repair_messages = self._build_skill_repair_messages(
+                            prompt=prompt,
+                            failed_step_id=step_id,
+                            error_message="blocked: low-level gateway not allowed",
+                            error_traceback="",
+                            original_plan=plan,
+                            step_results=step_results,
+                            allowed_skills=repair_skills,
+                            skill_schemas=skill_schemas,
+                            low_level_gateway_hint=True,
+                        )
+                        repair_plan = await self._llm_json(llm, repair_messages)
+                    except LLMError as llm_err:
+                        raise self._interrupt(
+                            "LLM auto-downgrade repair failed", step_id, i, _save_path,
+                            prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
+                        ) from llm_err
+                    if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
+                        raise ValueError("LLM auto-downgrade repair_plan missing 'steps'")
+                    repair_steps = repair_plan["steps"]
+                    if not isinstance(repair_steps, list):
+                        raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
+                    replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                    if replace_from and replace_from != step_id:
+                        replace_idx = _find_replace_idx(steps, replace_from)
+                        current_stage_rank = max(
+                            (stage_order[s["stage"]] for s in steps[:replace_idx]
+                             if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                            default=-1,
+                        )
+                        steps = steps[:replace_idx] + repair_steps
+                        i = replace_idx
+                    else:
+                        steps = steps[:i] + repair_steps
+                else:
+                    raise ValueError(
+                        f"Skill {skill} is blocked by allow_low_level_gateway=false. "
+                        "Use high-level skills / ops_* first."
+                    )
 
             attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
             if attempt_counts[step_id] > 1 + max_retries_per_step:
@@ -808,9 +882,19 @@ class VBFClient:
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
                 if replace_from and replace_from != step_id:
-                    raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
-
-                steps = steps[:i] + repair_steps
+                    replace_idx = _find_replace_idx(steps, replace_from)
+                    # Reset current_stage_rank to the highest rank of successfully completed steps
+                    # before the truncation point, so repair steps can use earlier stages.
+                    current_stage_rank = max(
+                        (stage_order[s["stage"]] for s in steps[:replace_idx]
+                         if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                        default=-1,
+                    )
+                    steps = steps[:replace_idx] + repair_steps
+                    i = replace_idx
+                else:
+                    steps = steps[:i] + repair_steps
+                    # i stays unchanged for equal replace case
 
             except LLMError as llm_err:
                 raise self._interrupt(
@@ -851,9 +935,19 @@ class VBFClient:
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
                 if replace_from and replace_from != step_id:
-                    raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
-
-                steps = steps[:i] + repair_steps
+                    replace_idx = _find_replace_idx(steps, replace_from)
+                    # Reset current_stage_rank to the highest rank of successfully completed steps
+                    # before the truncation point, so repair steps can use earlier stages.
+                    current_stage_rank = max(
+                        (stage_order[s["stage"]] for s in steps[:replace_idx]
+                         if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                        default=-1,
+                    )
+                    steps = steps[:replace_idx] + repair_steps
+                    i = replace_idx
+                else:
+                    steps = steps[:i] + repair_steps
+                    # i stays unchanged for equal replace case
 
         return {"prompt": prompt, "step_results": step_results, "plan": plan}
 
@@ -871,7 +965,11 @@ class VBFClient:
 
         controls = plan.get("controls", {}) if isinstance(plan, dict) else {}
         max_steps = int(controls.get("max_steps", 80)) if isinstance(controls, dict) else 80
-        allow_low_level_gateway = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
+        _llm_cfg = self._load_llm_config()
+        _config_allow = _llm_cfg.allow_low_level_gateway if _llm_cfg else False
+        _config_auto = _llm_cfg.auto_allow_low_level_gateway if _llm_cfg else True
+        _plan_allow = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
+        allow_low_level_gateway = _config_allow or _plan_allow
         require_ops_introspect = bool(controls.get("require_ops_introspect_before_invoke", True)) if isinstance(controls, dict) else True
 
         step_results: Dict[str, Dict[str, Any]] = {}
@@ -919,10 +1017,59 @@ class VBFClient:
 
             # Safety gates for low-level skills.
             if skill in {"py_call", "py_set"} and not allow_low_level_gateway:
-                raise ValueError(
-                    f"Skill {skill} is blocked by controls.allow_low_level_gateway=false. "
-                    "Use high-level skills / ops_* first."
-                )
+                if _config_auto:
+                    # Auto-downgrade: record blocked entry and trigger LLM repair with gateway hint
+                    step_results[step_id] = {
+                        "ok": False,
+                        "error": {
+                            "message": "blocked: low-level gateway not allowed, triggering auto-downgrade repair"
+                        },
+                    }
+                    repair_skills = list(allowed_skills)
+                    if "py_call" not in repair_skills:
+                        repair_skills.append("py_call")
+                    if "py_set" not in repair_skills:
+                        repair_skills.append("py_set")
+                    try:
+                        repair_messages = self._build_skill_repair_messages(
+                            prompt=prompt,
+                            failed_step_id=step_id,
+                            error_message="blocked: low-level gateway not allowed",
+                            error_traceback="",
+                            original_plan=plan,
+                            step_results=step_results,
+                            allowed_skills=repair_skills,
+                            skill_schemas=skill_schemas,
+                            low_level_gateway_hint=True,
+                        )
+                        repair_plan = await self._llm_json(llm, repair_messages)
+                    except LLMError as llm_err:
+                        raise self._interrupt(
+                            "LLM auto-downgrade repair failed", step_id, i, _save_path,
+                            prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
+                        ) from llm_err
+                    if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
+                        raise ValueError("LLM auto-downgrade repair_plan missing 'steps'")
+                    repair_steps = repair_plan["steps"]
+                    if not isinstance(repair_steps, list):
+                        raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
+                    replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                    if replace_from and replace_from != step_id:
+                        replace_idx = _find_replace_idx(steps, replace_from)
+                        current_stage_rank = max(
+                            (stage_order[s["stage"]] for s in steps[:replace_idx]
+                             if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                            default=-1,
+                        )
+                        steps = steps[:replace_idx] + repair_steps
+                        i = replace_idx
+                    else:
+                        steps = steps[:i] + repair_steps
+                else:
+                    raise ValueError(
+                        f"Skill {skill} is blocked by allow_low_level_gateway=false. "
+                        "Use high-level skills / ops_* first."
+                    )
 
             attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
             if attempt_counts[step_id] > 1 + max_retries_per_step:

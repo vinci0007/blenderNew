@@ -13,3 +13,7 @@ wheels/
 .references
 /.kiro
 /.hypothesis
+
+# VBF secrets & runtime state
+vbf/config/llm_config.json
+vbf/config/task_state.json

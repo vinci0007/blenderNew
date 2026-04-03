@@ -1,4 +1,9 @@
 Vibe-Blender-Flow（VBF）
+-----------------------------------------------------
+## Example
+** Make a cellphone
+![alt text](assets/llm_cellphone.gif)
+-----------------------------------------------------
 
 通过自然语言驱动 Blender 进行"原子化建模"。核心思想是：
 1) Blender 端提供封装好的 High-Level Skills（禁止 LLM 直接操作 bmesh 这类复杂底层）

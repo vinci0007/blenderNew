@@ -5,5 +5,7 @@
   "model": "gpt-4o-mini",
   "temperature": 0.2,
   "chat_completions_path": "/v1/chat/completions",
-  "use_response_format_json_object": true
+  "use_response_format_json_object": true,
+  "allow_low_level_gateway": false,
+  "auto_allow_low_level_gateway": true
 }
