@@ -431,8 +431,6 @@ SKILL_REGISTRY: Dict[str, Callable] = {
     # Lighting
     "create_light": create_light,
     "set_light_properties": set_light_properties,
-    "set_render_engine": set_render_engine,
-    "set_render_resolution": set_render_resolution,
 
     # Camera
     "create_camera": create_camera,
@@ -489,7 +487,6 @@ SKILL_REGISTRY: Dict[str, Callable] = {
     "delete_keyframe": delete_keyframe,
     "set_current_frame": set_current_frame,
     "get_current_frame": get_current_frame,
-    "set_frame_range": set_frame_range,
     "set_animation_fps": set_animation_fps,
     "clear_animation": clear_animation,
     "list_fcurves": list_fcurves,
@@ -717,7 +714,7 @@ SKILL_CATEGORIES = {
     "Constraints": ["set_parent", "clear_parent", "add_constraint_copy_location", "add_constraint_copy_rotation", "add_constraint_copy_scale", "add_constraint_limit_location", "remove_constraint", "list_constraints"],
     "Armature & Rigging": ["create_armature", "add_bone", "edit_bone", "delete_bone", "list_bones", "create_vertex_group", "skin_to_armature", "set_armature_modifier", "add_ik_constraint", "add_armature_constraint", "symmetrize_bones"],
     "Shape Keys": ["add_shape_key", "set_shape_key_value", "set_shape_key_range", "delete_shape_key", "rename_shape_key", "list_shape_keys", "reset_shape_keys", "shape_key_from_mix", "set_shape_key_vertex_position"],
-    "Animation": ["insert_keyframe", "delete_keyframe", "set_current_frame", "get_current_frame", "set_frame_range", "set_animation_fps", "clear_animation", "list_fcurves", "set_keyframe_interpolation", "evaluate_fcurve"],
+    "Animation": ["insert_keyframe", "delete_keyframe", "set_current_frame", "get_current_frame", "set_animation_fps", "clear_animation", "list_fcurves", "set_keyframe_interpolation", "evaluate_fcurve"],
     "Sculpting": ["set_sculpt_brush", "set_sculpt_symmetry", "sculpt_draw", "sculpt_smooth", "sculpt_grab", "sculpt_inflate", "sculpt_pinch", "sculpt_flatten", "sculpt_crease", "sculpt_layer", "dyntopo_enabled", "multires_add_level", "multires_apply", "remesh", "get_sculpt_mask"],
     "Physics": ["rigidbody_add", "rigidbody_set_mass", "rigidbody_set_collision_shape", "rigidbody_connect", "rigidbody_bake", "cloth_add", "cloth_pin_vertices", "cloth_bake", "fluid_domain_create", "fluid_emitter_add", "fluid_effector_add", "fluid_bake", "softbody_add", "force_field_add", "collision_add"],
     "Geometry Nodes": ["create_geometry_nodes_tree", "add_geometry_node", "link_geometry_nodes", "set_geometry_node_input", "set_node_tree_output", "bake_geometry_nodes", "geometry_nodes_to_mesh", "create_attribute", "set_attribute_values", "get_attribute_info", "list_attributes", "remove_attribute"],
