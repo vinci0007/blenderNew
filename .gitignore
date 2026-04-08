@@ -17,3 +17,5 @@ wheels/
 # VBF secrets & runtime state
 vbf/config/llm_config.json
 vbf/config/task_state.json
+assets/blender_python_reference_5_1.zip
+/assets/blender_python_reference_5_1
