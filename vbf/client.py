@@ -273,14 +273,29 @@ class VBFClient:
             ],
         }
 
+        # Group skills by category for better LLM organization
+        try:
+            from blender_provider.vbf_addon.skills_impl.registry import SKILL_CATEGORIES
+
+            skills_by_category = {}
+            for category_name, skill_names in SKILL_CATEGORIES.items():
+                skills_in_category = []
+                for skill_name in skill_names:
+                    if skill_name in allowed_skills:
+                        if skill_name in skill_schemas:
+                            skills_in_category.append({"name": skill_name, **skill_schemas[skill_name]})
+                        else:
+                            skills_in_category.append({"name": skill_name})
+                if skills_in_category:
+                    skills_by_category[category_name] = skills_in_category
+        except Exception:
+            # Fallback to flat list if categories not available
+            skills_by_category = None
+
         user = {
             "prompt": prompt,
             "task_type": "user_modeling_task",
-            "allowed_skills": [
-                {"name": name, **skill_schemas[name]} if skill_schemas is not None and name in skill_schemas else {"name": name}
-                for name in allowed_skills
-            ] if skill_schemas is not None else allowed_skills,
-            "skills_plan_schema": schema,
+            "allowed_skills_by_category": skills_by_category,
             "must_return_only_json": True,
             "instructions": [
                 "Decompose the user request into atomic Blender skills steps.",

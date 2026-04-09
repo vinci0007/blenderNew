@@ -9,21 +9,20 @@ import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import bpy  # type: ignore
+import bpy # type: ignore
 
 from .skills import SKILL_REGISTRY
 
 try:
-    import websockets  # type: ignore
-except Exception:  # pragma: no cover
+    import websockets # type: ignore
+except Exception: # pragma: no cover
     websockets = None
-
 
 HOST_ENV = "VBF_WS_HOST"
 PORT_ENV = "VBF_WS_PORT"
 
-
-def _extract_skill_schema(fn) -> dict:
+def _extract_skill_schema(fn, compact=False) -> dict:
+    """Extract skill schema with optional compact mode to save bandwidth."""
     sig = inspect.signature(fn)
     doc = inspect.getdoc(fn) or ""
     args = {}
@@ -34,15 +33,17 @@ def _extract_skill_schema(fn) -> dict:
             "type": str(param.annotation) if param.annotation is not inspect.Parameter.empty else "any",
         }
     first_line = doc.split("\n")[0].strip() if doc else ""
-    return {"description": first_line, "args": args, "doc": doc}
 
+    if compact:
+        return {"description": first_line, "args": args}
+
+    return {"description": first_line, "args": args, "doc": doc}
 
 @dataclass
 class _Job:
     req: Dict[str, Any]
     fut: asyncio.Future
     ws_id: str
-
 
 class VBFWebSocketServer:
     def __init__(self, host: str, port: int, poll_interval_s: float = 0.1):
@@ -193,14 +194,34 @@ class VBFWebSocketServer:
 
                 data = fn(**args)
                 resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": data}}
-            except Exception:
+            except ValueError as e:
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"Parameter error: {str(e)}",
+                        "data": {"traceback": traceback.format_exc()},
+                    },
+                }
+            except Exception as e:
+                # Capture Blender context for better LLM recovery
+                context_snapshot = {
+                    "active_object": getattr(bpy.context, "active_object", None).name if hasattr(bpy.context, "active_object") and bpy.context.active_object else None,
+                    "selected_objects": [obj.name for obj in bpy.context.selected_objects] if hasattr(bpy.context, "selected_objects") else [],
+                    "mode": getattr(bpy.context, "mode", "UNKNOWN"),
+                    "current_frame": getattr(bpy.context.scene, "frame_current", 0) if hasattr(bpy.context, "scene") else 0,
+                }
                 resp = {
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "error": {
                         "code": -32000,
-                        "message": "Skill execution failed",
-                        "data": {"traceback": traceback.format_exc()},
+                        "message": f"Skill execution failed: {str(e)}",
+                        "data": {
+                            "traceback": traceback.format_exc(),
+                            "blender_context": context_snapshot,
+                        },
                     },
                 }
 
@@ -210,9 +231,7 @@ class VBFWebSocketServer:
             except Exception:
                 pass
 
-
 _SERVER: Optional[VBFWebSocketServer] = None
-
 
 def get_server() -> VBFWebSocketServer:
     global _SERVER
@@ -221,7 +240,6 @@ def get_server() -> VBFWebSocketServer:
         port = 8006
         try:
             import os
-
             port = int(os.getenv(PORT_ENV, "8006"))
             host = os.getenv(HOST_ENV, host)
         except Exception:
@@ -238,7 +256,6 @@ def get_server() -> VBFWebSocketServer:
 
         _SERVER = VBFWebSocketServer(host=host, port=port)
     return _SERVER
-
 
 class VBF_OT_serve(bpy.types.Operator):
     bl_idname = "vbf.serve"
@@ -272,7 +289,6 @@ class VBF_OT_serve(bpy.types.Operator):
         except Exception:
             pass
 
-
 def _headless_poll():
     try:
         get_server().poll_once_and_execute()
@@ -280,13 +296,11 @@ def _headless_poll():
         pass
     return 0.1
 
-
 def start_vbf_ws_server() -> None:
     server = get_server()
     if not server.running:
         server.start()
     bpy.app.timers.register(_headless_poll, first_interval=0.1)
-
 
 class VBF_OT_stop(bpy.types.Operator):
     bl_idname = "vbf.stop"
@@ -298,4 +312,3 @@ class VBF_OT_stop(bpy.types.Operator):
         except Exception:
             pass
         return {"FINISHED"}
-
