@@ -4,7 +4,7 @@
 
 **[中文版](README_CN.md)** | **English**
 
-[![License](TBD)](LICENSE)
+[![License]TBD](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
