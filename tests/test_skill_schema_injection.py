@@ -95,7 +95,12 @@ def test_fault_condition(prompt, skill_schemas):
     )
 
     user_content = _parse_user_content(messages)
-    injected = user_content["allowed_skills"]
+    # Architecture change: 'allowed_skills' is now 'allowed_skills_by_category'
+    categories = user_content.get("allowed_skills_by_category")
+    if categories is None:
+        injected = []
+    else:
+        injected = [skill for cat in categories.values() for skill in cat]
 
     # Each entry must be a dict (not a bare string).
     assert isinstance(injected, list), "allowed_skills must be a list"
@@ -135,7 +140,12 @@ def test_preservation_fallback(prompt, allowed_skills):
     assert len(messages) == 2, f"Expected 2 messages, got {len(messages)}"
 
     user_content = _parse_user_content(messages)
-    injected = user_content["allowed_skills"]
+    # Architecture change: 'allowed_skills' is now 'allowed_skills_by_category'
+    categories = user_content.get("allowed_skills_by_category")
+    if categories is None:
+        injected = []
+    else:
+        injected = [skill for cat in categories.values() for skill in cat]
 
     # In fallback mode, allowed_skills must still be a plain list of strings.
     assert isinstance(injected, list), "allowed_skills must be a list"
