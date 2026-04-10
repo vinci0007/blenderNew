@@ -5,7 +5,6 @@ description = "Vibe-Blender-Flow: natural-language atomic modeling via Blender s
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "mathutils",
   "openai>=2.30.0",
   "websockets",
 ]

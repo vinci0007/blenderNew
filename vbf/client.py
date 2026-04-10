@@ -255,13 +255,13 @@ class VBFClient:
             print(f"[VBF] call_vbf_method failed: {e}")
             raise
 
-async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
-        """Request a physical rollback of the Blender scene to the state before the given step_id."""
-        try:
-            return await self.call_vbf_method("vbf.rollback_to_step", {"step_id": step_id})
-        except Exception as e:
-            print(f"[VBF] Physical rollback to {step_id} failed: {e}")
-            return {"ok": False, "error": str(e)}
+    async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
+            """Request a physical rollback of the Blender scene to the state before the given step_id."""
+            try:
+                return await self.call_vbf_method("vbf.rollback_to_step", {"step_id": step_id})
+            except Exception as e:
+                print(f"[VBF] Physical rollback to {step_id} failed: {e}")
+                return {"ok": False, "error": str(e)}
 
     def _build_skill_plan_messages(self, prompt: str, allowed_skills: List[str], skill_schemas: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
         # Generic plan schema for user-controlled modeling.
@@ -827,15 +827,15 @@ async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
                 if replace_from:
                     await self.rollback_to_step(replace_from)
 
-                if replace_from and replace_from != step_id:
-                        replace_idx = _find_replace_idx(steps, replace_from)
-                        current_stage_rank = max(
-                            (stage_order[s["stage"]] for s in steps[:replace_idx]
-                             if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                            default=-1,
-                        )
-                        steps = steps[:replace_idx] + repair_steps
-                        i = replace_idx
+                    if replace_from and replace_from != step_id:
+                            replace_idx = _find_replace_idx(steps, replace_from)
+                            current_stage_rank = max(
+                                (stage_order[s["stage"]] for s in steps[:replace_idx]
+                                if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                                default=-1,
+                            )
+                            steps = steps[:replace_idx] + repair_steps
+                            i = replace_idx
                     else:
                         steps = steps[:i] + repair_steps
                 else:
@@ -997,7 +997,7 @@ async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
                     steps = steps[:i] + repair_steps
                     # i stays unchanged for equal replace case
 
-        return {"prompt": prompt, "step_results": step_results, "plan": plan}
+            return {"prompt": prompt, "step_results": step_results, "plan": plan}
 
         plan, steps = await self._plan_skill_task(prompt, allowed_skills)
 
@@ -1106,15 +1106,15 @@ async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
                 if replace_from:
                     await self.rollback_to_step(replace_from)
 
-                if replace_from and replace_from != step_id:
-                        replace_idx = _find_replace_idx(steps, replace_from)
-                        current_stage_rank = max(
-                            (stage_order[s["stage"]] for s in steps[:replace_idx]
-                             if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                            default=-1,
-                        )
-                        steps = steps[:replace_idx] + repair_steps
-                        i = replace_idx
+                    if replace_from and replace_from != step_id:
+                            replace_idx = _find_replace_idx(steps, replace_from)
+                            current_stage_rank = max(
+                                (stage_order[s["stage"]] for s in steps[:replace_idx]
+                                if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
+                                default=-1,
+                            )
+                            steps = steps[:replace_idx] + repair_steps
+                            i = replace_idx
                     else:
                         steps = steps[:i] + repair_steps
                 else:

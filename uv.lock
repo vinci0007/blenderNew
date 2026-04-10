@@ -269,16 +269,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mathutils"
-version = "5.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/74/57/1b9ca6d44e0a79bac7702cd433191b58b6071d4b5167064c28a0e74e0402/mathutils-5.1.0.tar.gz", hash = "sha256:b171af9d6b54a12138c9dead4f5930a3faaf92387cc5ffaa82f18fbee1554168", size = 350638 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/4a/0a8b52b63f5bfd0e2d7b842014ac1d6df47fea57337a0d739f18cf502942/mathutils-5.1.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:77469262f83c976008fa8ed3e09a3e8ad95701058a8e3384116ac4f398daaaa9", size = 2655860 },
-    { url = "https://files.pythonhosted.org/packages/3a/96/babe697bb06232a6d1662d4fcebbe487e2a8dc21200ffe9280e022ae5e9b/mathutils-5.1.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5511a3fa173ddfc275416a77920f28bc31980cd65ff6354391a136e1d5ea9e15", size = 2655710 },
-]
-
-[[package]]
 name = "numpy"
 version = "1.26.4"
 source = { registry = "https://pypi.org/simple" }
@@ -494,7 +484,6 @@ name = "vibe-blender-flow"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "mathutils" },
     { name = "openai" },
     { name = "websockets" },
 ]
@@ -508,7 +497,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mathutils" },
     { name = "openai", specifier = ">=2.30.0" },
     { name = "websockets" },
 ]
