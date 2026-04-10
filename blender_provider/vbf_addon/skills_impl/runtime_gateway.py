@@ -6,7 +6,7 @@ import bpy
 try:
     # Standard: installed as standalone addon folder (vbf_addon/skill_runtime)
     from ..skill_runtime import py_call, py_get, py_set
-    from ...skills_impl import utils
+    from ..skills_impl import utils
 except ImportError:
     # Fallback: Blender loads the folder as a plain script (no package context)
     from skill_runtime import py_call, py_get, py_set  # type: ignore
@@ -141,6 +141,7 @@ def _validate_op_args(operator_id: str, kwargs: Dict[str, Any]) -> Dict[str, Any
             "ENUM": (str,),
             "POINTER": (str, object),
             "COLLECTION": (list, tuple, set),
+        }
 
         for key, value in kwargs.items():
             if key not in expected_props:

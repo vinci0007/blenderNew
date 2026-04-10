@@ -58,6 +58,11 @@ class VBFWebSocketServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Any = None
 
+        # Track undo stack depth for each step_id to support physical rollbacks
+        # Mapping: step_id -> undo_stack_index
+        self._step_undo_map: Dict[str, int] = {}
+        self._current_undo_count = 0
+
     @property
     def running(self) -> bool:
         return self._running
@@ -130,6 +135,32 @@ class VBFWebSocketServer:
                     await websocket.send(json.dumps(resp))
                     continue
 
+                if method == "vbf.rollback_to_step":
+                    step_id = params.get("step_id") if isinstance(params, dict) else None
+                    if not step_id or not isinstance(step_id, str):
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32602, "message": "Invalid params: step_id must be a string"},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    # Rollback must be executed on the main thread via the job queue
+                    fut: asyncio.Future = loop.create_future()
+                    # Special job format for rollback
+                    self._incoming.put(_Job(req={"method": "vbf.rollback_to_step", "params": {"step_id": step_id}, "id": req_id}, fut=fut, ws_id=ws_id))
+                    try:
+                        result_payload = await fut
+                    except Exception:
+                        result_payload = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32000, "message": "Internal server error during rollback"},
+                        }
+                    await websocket.send(json.dumps(result_payload))
+                    continue
+
                 if method != "vbf.execute_skill":
                     resp = {
                         "jsonrpc": "2.0",
@@ -178,22 +209,68 @@ class VBFWebSocketServer:
                 break
 
             req_id = job.req.get("id")
+            method = job.req.get("method", "vbf.execute_skill") # Default to execute_skill
             try:
                 params = job.req.get("params") or {}
-                skill = params.get("skill")
-                args = params.get("args") or {}
 
-                if not isinstance(args, dict):
-                    raise ValueError("params.args must be an object")
-                if not skill or not isinstance(skill, str):
-                    raise ValueError("params.skill must be a string")
+                if method == "vbf.rollback_to_step":
+                    step_id = params.get("step_id")
+                    if not step_id or step_id not in self._step_undo_map:
+                        raise ValueError(f"Unknown or missing step_id for rollback: {step_id}")
 
-                fn = SKILL_REGISTRY.get(skill)
-                if not fn:
-                    raise ValueError(f"Unknown skill: {skill}")
+                    # Calculate how many undos are needed
+                    target_undo_count = self._step_undo_map[step_id]
+                    current_undo_count = self._current_undo_count
+                    undo_diff = current_undo_count - target_undo_count
 
-                data = fn(**args)
-                resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": data}}
+                    if undo_diff < 0:
+                        raise ValueError(f"Cannot rollback forward: target {target_undo_count}, current {current_undo_count}")
+
+                    # Execute undos
+                    for _ in range(undo_diff):
+                        bpy.ops.ed.undo()
+
+                    self._current_undo_count = target_undo_count
+
+                    # Cleanup the map: remove all steps that happened after this one
+                    # Since steps are added sequentially, we can just filter by count
+                    self._step_undo_map = {sid: cnt for sid, cnt in self._step_undo_map.items() if cnt <= target_undo_count}
+
+                    resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": {"undone_steps": undo_diff}}}
+                else:
+                    # Normal execute_skill path
+                    skill = params.get("skill")
+                    args = params.get("args") or {}
+
+                    if not isinstance(args, dict):
+                        raise ValueError("params.args must be an object")
+                    if not skill or not isinstance(skill, str):
+                        raise ValueError("params.skill must be a string")
+
+                    fn = SKILL_REGISTRY.get(skill)
+                    if not fn:
+                        raise ValueError(f"Unknown skill: {skill}")
+
+                    # Record undo state before executing.
+                    # We use a simple counter of successful VBF operations that typically trigger undo.
+                    # Note: In a real scenario, we'd check if the op actually created an undo step.
+                    # For now, we assume each successful skill execution adds one undo step.
+                    # We can't easily get the global undo index from bpy, so we track relative to server start.
+
+                    # We use the step_id if it's passed in params, otherwise we can't track it.
+                    # The client should pass 'step_id' in params for tracking.
+                    step_id = params.get("step_id")
+                    if step_id:
+                        self._step_undo_map[step_id] = self._current_undo_count
+
+                    data = fn(**args)
+
+                    # If successful, increment our internal undo tracker
+                    if step_id:
+                        self._current_undo_count += 1
+
+                    resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": data}}
+
             except ValueError as e:
                 resp = {
                     "jsonrpc": "2.0",

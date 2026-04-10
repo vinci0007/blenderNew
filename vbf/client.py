@@ -74,10 +74,10 @@ class VBFClient:
 
         raise TimeoutError(f"Unable to connect to Blender VBF WS at {self.host}:{self.port}") from last_err
 
-    async def execute_skill(self, skill: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def execute_skill(self, skill: str, args: Optional[Dict[str, Any]] = None, step_id: Optional[str] = None) -> Dict[str, Any]:
         result = await self._ws.call(
             method="vbf.execute_skill",
-            params={"skill": skill, "args": args or {}},
+            params={"skill": skill, "args": args or {}, "step_id": step_id},
         )
         # Expected: {"ok": true/false, "data": {...}} OR raises JsonRpcError on error.
         return result
@@ -245,6 +245,23 @@ class VBFClient:
             return data.get("skills") or None
         except Exception:
             return None
+
+    
+    async def call_vbf_method(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a VBF JSON-RPC method directly."""
+        try:
+            return await self._ws.call(method=method, params=params)
+        except Exception as e:
+            print(f"[VBF] call_vbf_method failed: {e}")
+            raise
+
+async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
+        """Request a physical rollback of the Blender scene to the state before the given step_id."""
+        try:
+            return await self.call_vbf_method("vbf.rollback_to_step", {"step_id": step_id})
+        except Exception as e:
+            print(f"[VBF] Physical rollback to {step_id} failed: {e}")
+            return {"ok": False, "error": str(e)}
 
     def _build_skill_plan_messages(self, prompt: str, allowed_skills: List[str], skill_schemas: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
         # Generic plan schema for user-controlled modeling.
@@ -628,6 +645,10 @@ class VBFClient:
                     raise ValueError("LLM repair_plan 'steps' must be a list")
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
                 if replace_from and replace_from != step_id:
                     # Still allow, but reset to i = index of replace_from if possible.
                     # For now, enforce equality to keep references stable.
@@ -802,7 +823,11 @@ class VBFClient:
                     if not isinstance(repair_steps, list):
                         raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
                     replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                    if replace_from and replace_from != step_id:
+                    # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
+                if replace_from and replace_from != step_id:
                         replace_idx = _find_replace_idx(steps, replace_from)
                         current_stage_rank = max(
                             (stage_order[s["stage"]] for s in steps[:replace_idx]
@@ -896,6 +921,10 @@ class VBFClient:
                     raise ValueError("LLM repair_plan 'steps' must be a list")
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
                 if replace_from and replace_from != step_id:
                     replace_idx = _find_replace_idx(steps, replace_from)
                     # Reset current_stage_rank to the highest rank of successfully completed steps
@@ -949,6 +978,10 @@ class VBFClient:
                     raise ValueError("LLM repair_plan 'steps' must be a list")
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
                 if replace_from and replace_from != step_id:
                     replace_idx = _find_replace_idx(steps, replace_from)
                     # Reset current_stage_rank to the highest rank of successfully completed steps
@@ -1069,7 +1102,11 @@ class VBFClient:
                     if not isinstance(repair_steps, list):
                         raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
                     replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                    if replace_from and replace_from != step_id:
+                    # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
+                if replace_from and replace_from != step_id:
                         replace_idx = _find_replace_idx(steps, replace_from)
                         current_stage_rank = max(
                             (stage_order[s["stage"]] for s in steps[:replace_idx]
@@ -1158,6 +1195,10 @@ class VBFClient:
                     raise ValueError("LLM repair_plan 'steps' must be a list")
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
                 if replace_from and replace_from != step_id:
                     raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
 
@@ -1188,6 +1229,10 @@ class VBFClient:
                     raise ValueError("LLM repair_plan 'steps' must be a list")
 
                 replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
+                # Physical rollback if we are replacing from an earlier step
+                if replace_from:
+                    await self.rollback_to_step(replace_from)
+
                 if replace_from and replace_from != step_id:
                     raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
 
