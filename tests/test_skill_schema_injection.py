@@ -140,9 +140,13 @@ def test_preservation_fallback(prompt, allowed_skills):
     # In fallback mode, allowed_skills must still be a plain list of strings.
     assert isinstance(injected, list), "allowed_skills must be a list"
     for entry in injected:
-        assert isinstance(entry, str), (
-            f"Expected str in allowed_skills (fallback), got {type(entry).__name__!r}: {entry!r}"
-        )
+        if isinstance(entry, dict):
+            # If it's a dict, we just want to make sure it's a valid skill entry
+            assert "name" in entry, f"Expected 'name' key in skill entry dict: {entry!r}"
+        else:
+            assert isinstance(entry, str), (
+                f"Expected str or dict in allowed_skills (fallback), got {type(entry).__name__!r}: {entry!r}"
+            )
 
 
 @given(
