@@ -31,3 +31,5 @@ SKILL.md
 SKILL_EXTRACTED.md
 docs/覆盖率.md
 find-buddy.bat
+/tests/.hypothesis
+tests/a.py

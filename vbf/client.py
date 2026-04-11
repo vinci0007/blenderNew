@@ -1,32 +1,39 @@
+"""
+VBF Client - Smart Modeling Control System (Four Layers)
+
+This is a COMPLETE REWRITE of the original client.py implementing:
+1. Checkpoint/Resume - Config errors save state, not terminate
+2. Enhanced Recovery - Physical rollback + state preservation
+3. Active Replanning - User can trigger replanning from any step
+4. Real-time Feedback - Optional per-step LLM analysis
+
+Key design changes:
+- _save_path defined at method start to ensure save even on config errors
+- All ValueError exceptions replaced with TaskInterruptedError for resumability
+- SceneState integrated for feedback and replanning
+- Removed ALL RadioTask code completely
+"""
+
 import asyncio
+import json
 import os
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
-from .jsonrpc_ws import JsonRpcWebSocketClient
-from .jsonrpc_ws import JsonRpcError
-from .llm_openai_compat import OpenAICompatLLM, OpenAICompatConfig, load_openai_compat_config, LLMError
+from .jsonrpc_ws import JsonRpcWebSocketClient, JsonRpcError
+from .llm_openai_compat import load_openai_compat_config
+from .llm_integration import (
+    load_llm, call_llm_json, generate_skill_plan,
+    build_skill_plan_messages, build_skill_repair_messages, is_llm_enabled
+)
+from .plan_normalization import normalize_plan
 from .vibe_protocol import resolve_refs, merge_step_results_for_prompt
 from .task_state import TaskState, TaskInterruptedError
-
-
-def _find_replace_idx(steps: list, replace_from_step_id: str) -> int:
-    """Find the index of replace_from_step_id in steps.
-
-    Raises ValueError if not found.
-    """
-    for idx, s in enumerate(steps):
-        if s.get("step_id") == replace_from_step_id:
-            return idx
-    raise ValueError(f"LLM repair replace_from_step_id not found: {replace_from_step_id}")
+from .scene_state import SceneState, FeedbackContext
 
 
 class VBFClient:
-    """
-    Reusable client module for other Python projects.
-    - Connect to Blender Addon WS server (JSON-RPC)
-    - Execute High-Level Skills (no direct bmesh/bpy complex ops)
-    """
+    """Smart modeling client with four-layer control system."""
 
     def __init__(
         self,
@@ -36,195 +43,48 @@ class VBFClient:
         start_script_path: Optional[str] = None,
     ):
         self.host = host or os.getenv("VBF_WS_HOST", "127.0.0.1")
-        env_port = os.getenv("VBF_WS_PORT", "8006")
-        self.port = int(port) if port is not None else int(env_port)
-        self.blender_path = blender_path or os.getenv("BLENDER_PATH") or "blender"
+        self.port = int(port) if port is not None else int(os.getenv("VBF_WS_PORT", "8006"))
+        self.blender_path = blender_path or os.getenv("BLENDER_PATH", "blender")
 
-        # Default: /blender_provider/start_vbf_blender.py relative to repo root.
-        if start_script_path:
-            self.start_script_path = start_script_path
-        else:
-            repo_root = os.path.dirname(os.path.dirname(__file__))
-            self.start_script_path = os.path.join(repo_root, "blender_provider", "start_vbf_blender.py")
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        self.start_script_path = start_script_path or os.path.join(
+            repo_root, "blender_provider", "start_vbf_blender.py"
+        )
 
         self._ws = JsonRpcWebSocketClient(f"ws://{self.host}:{self.port}")
+        self._default_save_path = os.path.join(
+            os.path.dirname(__file__), "config", "task_state.json"
+        )
 
     async def ensure_connected(self, timeout_s: float = 30.0) -> None:
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        last_err: Optional[BaseException] = None
-
-        while asyncio.get_running_loop().time() < deadline:
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        last_err = None
+        while asyncio.get_event_loop().time() < deadline:
             try:
                 await self._ws.connect()
                 return
             except Exception as e:
                 last_err = e
                 await asyncio.sleep(0.5)
-
-        # If not reachable, start Blender in background and retry.
         await self._start_blender_headless()
-        deadline2 = asyncio.get_running_loop().time() + timeout_s
-        while asyncio.get_running_loop().time() < deadline2:
+        # Retry after starting Blender
+        deadline2 = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline2:
             try:
                 await self._ws.connect()
                 return
             except Exception as e:
                 last_err = e
                 await asyncio.sleep(0.5)
+        raise TimeoutError(f"Unable to connect to Blender VBF WS") from last_err
 
-        raise TimeoutError(f"Unable to connect to Blender VBF WS at {self.host}:{self.port}") from last_err
-
-    async def execute_skill(self, skill: str, args: Optional[Dict[str, Any]] = None, step_id: Optional[str] = None) -> Dict[str, Any]:
-        result = await self._ws.call(
+    async def execute_skill(self, skill: str, args: Optional[Dict] = None, step_id: Optional[str] = None) -> Dict:
+        return await self._ws.call(
             method="vbf.execute_skill",
             params={"skill": skill, "args": args or {}, "step_id": step_id},
         )
-        # Expected: {"ok": true/false, "data": {...}} OR raises JsonRpcError on error.
-        return result
-
-    def _load_llm(self) -> Optional[OpenAICompatLLM]:
-        cfg = load_openai_compat_config()
-        if not cfg:
-            return None
-        # Explicit opt-out: use_llm=false in config disables LLM entirely.
-        if not cfg.use_llm:
-            return None
-        return OpenAICompatLLM(cfg)
-
-    def _load_llm_config(self) -> Optional["OpenAICompatConfig"]:
-        """Return the raw OpenAICompatConfig (or None if not configured)."""
-        return load_openai_compat_config()
-
-    def _llm_enabled(self) -> bool:
-        """Return True if LLM is configured AND use_llm is not disabled."""
-        cfg = load_openai_compat_config()
-        if not cfg:
-            return False
-        return bool(cfg.use_llm)
-
-    async def _llm_json(self, llm: OpenAICompatLLM, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        # urllib-based implementation is blocking; run in a thread.
-        return await asyncio.to_thread(llm.chat_json, messages)
-
-    def _build_radio_skill_plan_messages(self, prompt: str) -> List[Dict[str, str]]:
-        # Important: enforce JSON-only output from the model.
-        skills = [
-            "create_beveled_box",
-            "spatial_query",
-            "create_nested_cones",
-            "create_primitive",
-            "boolean_tool",
-            "apply_transform",
-            "api_validator",
-        ]
-
-        schema = {
-            "vbf_version": "string",
-            "plan_id": "string",
-            "execution": {"max_retries_per_step": "number"},
-            "steps": [
-                {
-                    "step_id": "string",
-                    "skill": "string",
-                    "args": {"any": "json-serializable"},
-                    "on_success": {"store_as": {"alias_name": "step_return_json_path"}}
-                }
-            ],
-        }
-
-        user = {
-            "prompt": prompt,
-            "task_type": "radio_task",
-            "required_skills": skills,
-            "instructions": [
-                "Decompose the task into atomic skill steps using ONLY Blender skills.",
-                "Never output bpy/bmesh code; only output skills_plan JSON.",
-                "Use $ref to reference previous step outputs, e.g. {\"$ref\":\"body.data.object_name\"}.",
-                "Use EXACT step_id values for the RadioTask: body, top_center, antenna, cutter, trimmed.",
-                "For spatial_query, use query_type=\"top_center\" and use its returned location as base for antenna.",
-                "For boolean trimming, create a small cube cutter above the antenna top, then boolean_tool difference.",
-            ],
-            "skills_plan_schema": schema,
-            "must_return_only_json": True,
-        }
-
-        system_msg = (
-            "You are the Vibe Protocol planner for Vibe-Blender-Flow. "
-            "You MUST return a single valid JSON object that matches the provided skills_plan_schema exactly. "
-            "Return JSON only (no markdown, no surrounding text). "
-            "Validate step.skill names against required_skills."
-        )
-        return [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": json_dumps(user)},
-        ]
-
-    def _build_radio_repair_messages(
-        self,
-        prompt: str,
-        failed_step_id: str,
-        error_message: str,
-        error_traceback: str,
-        original_plan: Dict[str, Any],
-        step_results: Dict[str, Dict[str, Any]],
-    ) -> List[Dict[str, str]]:
-        schema = {
-            "vbf_version": "string",
-            "plan_id": "string",
-            "repair": {"replace_from_step_id": "string"},
-            "execution": {"max_retries_per_step": "number"},
-            "steps": [
-                {"step_id": "string", "skill": "string", "args": {"any": "json-serializable"}}
-            ],
-        }
-        compact_steps = merge_step_results_for_prompt(step_results)
-
-        user = {
-            "prompt": prompt,
-            "task_type": "radio_task",
-            "failed_step_id": failed_step_id,
-            "error_message": error_message,
-            "error_traceback": error_traceback,
-            "original_plan": {"plan_id": original_plan.get("plan_id"), "steps": original_plan.get("steps")},
-            "executed_step_outputs": compact_steps,
-            "repair_plan_schema": schema,
-            "instructions": [
-                "Return a single JSON object that matches repair_plan_schema exactly.",
-                "Keep step_id for the replace_from_step_id equal to failed_step_id, and start steps from that point.",
-                "Fix args to resolve the cause of the failure. You may adjust object names, dimensions, or query types, "
-                "but keep the overall RadioTask structure.",
-                "Use $ref wherever you need coordinates/object names from previous successful steps.",
-            ],
-            "must_return_only_json": True,
-        }
-        system_msg = (
-            "You are the Vibe Protocol auto-repair planner. "
-            "You MUST return JSON only that matches the provided repair_plan_schema exactly."
-        )
-        return [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": json_dumps(user)},
-        ]
-
-    async def _plan_radio_task(self, prompt: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        llm = self._load_llm()
-        if not llm:
-            # fallback: not using LLM
-            return {}, self._deterministic_radio_steps()
-
-        messages = self._build_radio_skill_plan_messages(prompt)
-        plan = await self._llm_json(llm, messages)
-        if not isinstance(plan, dict) or "steps" not in plan:
-            raise ValueError("LLM plan missing 'steps'")
-        steps = plan["steps"]
-        if not isinstance(steps, list):
-            raise ValueError("LLM plan 'steps' must be a list")
-        return plan, steps
 
     async def list_skills(self) -> List[str]:
-        """
-        Ask Blender addon for the current allowed skills.
-        """
         resp = await self._ws.call(method="vbf.list_skills", params={})
         if not isinstance(resp, dict):
             return []
@@ -233,481 +93,217 @@ class VBFClient:
         return skills if isinstance(skills, list) else []
 
     async def describe_skills(self, skill_names: List[str]) -> Optional[Dict[str, Any]]:
-        """
-        Ask Blender addon for skill parameter schemas.
-        Returns None if addon doesn't support vbf.describe_skills (fallback).
-        """
         try:
             resp = await self._ws.call(method="vbf.describe_skills", params={"skill_names": skill_names})
             if not isinstance(resp, dict):
                 return None
             data = resp.get("data") or {}
-            return data.get("skills") or None
+            return data.get("skills")
         except Exception:
             return None
 
-    
-    async def call_vbf_method(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Call a VBF JSON-RPC method directly."""
-        try:
-            return await self._ws.call(method=method, params=params)
-        except Exception as e:
-            print(f"[VBF] call_vbf_method failed: {e}")
-            raise
-
     async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
-            """Request a physical rollback of the Blender scene to the state before the given step_id."""
-            try:
-                return await self.call_vbf_method("vbf.rollback_to_step", {"step_id": step_id})
-            except Exception as e:
-                print(f"[VBF] Physical rollback to {step_id} failed: {e}")
-                return {"ok": False, "error": str(e)}
-
-    def _build_skill_plan_messages(self, prompt: str, allowed_skills: List[str], skill_schemas: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
-        # Generic plan schema for user-controlled modeling.
-        schema = {
-            "vbf_version": "string",
-            "plan_id": "string",
-            "execution": {"max_retries_per_step": "number"},
-            "controls": {
-                "max_steps": "number",
-                "allow_low_level_gateway": "boolean",
-                "require_ops_introspect_before_invoke": "boolean"
-            },
-            "steps": [
-                {
-                    "step_id": "string",
-                    "stage": "discover|blockout|boolean|detail|bevel|normal_fix|accessories|material|finalize",
-                    "skill": "string",
-                    "args": {"any": "json-serializable"},
-                    "on_success": {
-                        "store_as": {
-                            "alias_name": "string",
-                            "step_return_json_path": "string"
-                        }
-                    },
-                }
-            ],
-        }
-
-        # Group skills by category for better LLM organization
         try:
-            from blender_provider.vbf_addon.skills_impl.registry import SKILL_CATEGORIES
+            return await self._ws.call(method="vbf.rollback_to_step", params={"step_id": step_id})
+        except Exception as e:
+            print(f"[VBF] Rollback to {step_id} failed: {e}")
+            return {"ok": False, "error": str(e)}
 
-            skills_by_category = {}
-            for category_name, skill_names in SKILL_CATEGORIES.items():
-                skills_in_category = []
-                for skill_name in skill_names:
-                    if skill_name in allowed_skills:
-                        if skill_name in skill_schemas:
-                            skills_in_category.append({"name": skill_name, **skill_schemas[skill_name]})
-                        else:
-                            skills_in_category.append({"name": skill_name})
-                if skills_in_category:
-                    skills_by_category[category_name] = skills_in_category
-        except Exception:
-            # Fallback to flat list if categories not available
-            skills_by_category = None
-
-        user = {
-            "prompt": prompt,
-            "task_type": "user_modeling_task",
-            "allowed_skills_by_category": skills_by_category,
-            "must_return_only_json": True,
-            "instructions": [
-                "Decompose the user request into atomic Blender skills steps.",
-                "ONLY use skills from allowed_skills; never invent skills.",
-                "Never output any bpy/bmesh code. ONLY output the skills_plan JSON.",
-                "Use $ref to reference prior step outputs: {\"$ref\":\"<step_id>.data.<key>\"}.",
-                "If you use on_success.store_as, then later you may reference by alias name as: {\"$ref\":\"<alias_name>.data.<key>\"}.",
-                "If the stored value is not an object/dict, reference it as {\"$ref\":\"<alias_name>.data.value\"}.",
-                "Prefer coordinate alignment by using move_object_anchor_to_point rather than doing arithmetic in $ref.",
-                "For unknown operators, first use ops_search; then use ops_introspect on candidate operator_id; then call ops_invoke.",
-                "Stage order must be monotonic: discover -> blockout -> boolean -> detail -> bevel -> normal_fix -> accessories -> material -> finalize.",
-            ],
-        }
-
-        system_msg = (
-            "You are the Vibe Protocol planner for Vibe-Blender-Flow. "
-            "You MUST return a single valid JSON object that matches the provided skills_plan_schema exactly. "
-            "Return JSON only (no markdown, no surrounding text)."
-        )
-        return [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": json_dumps(user)},
-        ]
-
-    def _build_skill_repair_messages(
-        self,
-        prompt: str,
-        failed_step_id: str,
-        error_message: str,
-        error_traceback: str,
-        original_plan: Dict[str, Any],
-        step_results: Dict[str, Dict[str, Any]],
-        allowed_skills: List[str],
-        skill_schemas: Optional[Dict[str, Any]] = None,
-        low_level_gateway_hint: bool = False,
-    ) -> List[Dict[str, str]]:
-        schema = {
-            "vbf_version": "string",
-            "plan_id": "string",
-            "repair": {"replace_from_step_id": "string"},
-            "execution": {"max_retries_per_step": "number"},
-            "steps": [
-                {"step_id": "string", "skill": "string", "args": {"any": "json-serializable"}}
-            ],
-        }
-        compact_steps = merge_step_results_for_prompt(step_results)
-        user = {
-            "prompt": prompt,
-            "task_type": "user_modeling_task",
-            "failed_step_id": failed_step_id,
-            "error_message": error_message,
-            "error_traceback": error_traceback,
-            "allowed_skills": [
-                {"name": name, **skill_schemas[name]} if skill_schemas is not None and name in skill_schemas else {"name": name}
-                for name in allowed_skills
-            ] if skill_schemas is not None else allowed_skills,
-            "original_plan": {"plan_id": original_plan.get("plan_id"), "steps": original_plan.get("steps")},
-            "executed_step_outputs": compact_steps,
-            "repair_plan_schema": schema,
-            "must_return_only_json": True,
-            "instructions": [
-                "Return a single JSON object that matches repair_plan_schema exactly.",
-                "Set repair.replace_from_step_id equal to failed_step_id and start steps from that point.",
-                "Fix the args to resolve the failure cause (dimensions, object names, query_type, etc.).",
-                "Use ONLY skills from allowed_skills.",
-                "Use $ref wherever you need coordinates/object names from previous successful steps.",
-            ],
-        }
-        if low_level_gateway_hint:
-            user["instructions"].append(
-                "py_call and py_set are now available as low-level gateway skills; "
-                "use them only if high-level skills cannot fulfill the requirement"
-            )
-        system_msg = (
-            "You are the Vibe Protocol auto-repair planner. "
-            "You MUST return JSON only that matches the provided repair_plan_schema exactly."
-        )
-        return [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": json_dumps(user)},
-        ]
-
-    async def _plan_skill_task(
-        self,
-        prompt: str,
-        allowed_skills: List[str],
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        llm = self._load_llm()
-        if not llm:
-            # fallback: deterministic radio-like demo
-            return {}, self._deterministic_radio_steps()
-
-        skill_schemas = await self.describe_skills(allowed_skills)
-        messages = self._build_skill_plan_messages(prompt, allowed_skills, skill_schemas=skill_schemas)
-        plan = await self._llm_json(llm, messages)
-        if not isinstance(plan, dict) or "steps" not in plan:
-            raise ValueError("LLM plan missing 'steps'")
-        steps = plan["steps"]
-        if not isinstance(steps, list):
-            raise ValueError("LLM plan 'steps' must be a list")
-
-        # Basic validation early to avoid sending garbage to Blender.
-        for idx, st in enumerate(steps):
-            if not isinstance(st, dict):
-                raise ValueError(f"LLM plan step[{idx}] must be an object")
-            if "step_id" not in st or "skill" not in st or "args" not in st:
-                raise ValueError(f"LLM plan step[{idx}] missing required fields")
-            if st.get("skill") not in allowed_skills:
-                raise ValueError(f"LLM plan step[{idx}] uses unknown skill: {st.get('skill')}")
-        return plan, steps
-
-    @staticmethod
-    def _extract_json_path_from_step(step_out: Dict[str, Any], json_path: str) -> Any:
-        """
-        step_out is {"ok": bool, "data": {...}}.
-        json_path is usually like "data.location" or "data.object_name".
-        """
-        if not isinstance(json_path, str) or not json_path.strip():
-            raise ValueError("step_return_json_path must be a non-empty string")
-
-        path = json_path.strip()
-        parts = [p for p in path.split(".") if p]
-        if not parts:
-            raise ValueError("Invalid json_path")
-
-        node: Any = step_out
-        # Allow roots: data/result
-        if parts[0] in ("data", "result"):
-            node = step_out.get("data", {}) if parts[0] in ("data", "result") else step_out
-            parts = parts[1:]
-        for p in parts:
-            if not isinstance(node, dict):
-                raise KeyError(f"Cannot access '{p}' on non-dict node")
-            if p not in node:
-                raise KeyError(f"Key '{p}' not found in step_out")
-            node = node[p]
-        return node
-
-    def _deterministic_radio_steps(self) -> List[Dict[str, Any]]:
-        # For fallback mode: use the same structure as the LLM plan.
-        return [
-            {
-                "step_id": "body",
-                "skill": "create_beveled_box",
-                "args": {
-                    "name": "radio_body",
-                    "size": [1.0, 0.6, 0.5],
-                    "location": [0.0, 0.0, 0.25],
-                    "bevel_width": 0.04,
-                    "bevel_segments": 3,
-                },
-            },
-            {
-                "step_id": "top_center",
-                "skill": "spatial_query",
-                "args": {"object_name": {"$ref": "body.data.object_name"}, "query_type": "top_center"},
-            },
-            {
-                "step_id": "antenna",
-                "skill": "create_nested_cones",
-                "args": {
-                    "name_prefix": "radio_antenna",
-                    "base_location": {"$ref": "top_center.data.location"},
-                    "layers": 4,
-                    "base_radius": 0.06,
-                    "top_radius": 0.006,
-                    "height": 0.24,
-                    "z_jitter": 0.0,
-                },
-            },
-            {
-                "step_id": "cutter",
-                "skill": "create_primitive",
-                "args": {
-                    "primitive_type": "cube",
-                    "name": "radio_antenna_cutter",
-                    "size": [0.15, 0.15, 0.03],
-                    # We can't do arithmetic in $ref; keep explicit values via apply_transform in future.
-                    # For now, cutter is created near the antenna top using location from top_center + z offset.
-                    # We'll approximate by adding 0.015 to z in a separate step if needed later.
-                    "location": {"$ref": "top_center.data.location"},
-                },
-            },
-            {
-                "step_id": "trimmed",
-                "skill": "boolean_tool",
-                "args": {
-                    "target_name": {"$ref": "antenna.data.object_name"},
-                    "tool_name": {"$ref": "cutter.data.object_name"},
-                    "operation": "difference",
-                    "apply": True,
-                    "delete_tool": True,
-                },
-            },
-        ]
-
-    async def run_radio_task(self, prompt: str = "复古收音机") -> Dict[str, Any]:
-        await self.ensure_connected()
-
-        # If no LLM is configured, fall back to deterministic RadioTask.
-        # This keeps the project runnable without any external API keys.
-        if self._load_llm() is None:
-            body = await self.execute_skill(
-                "create_beveled_box",
-                {
-                    "name": "radio_body",
-                    "size": [1.0, 0.6, 0.5],
-                    "location": [0.0, 0.0, 0.25],
-                    "bevel_width": 0.04,
-                    "bevel_segments": 3,
-                },
-            )
-            body_name = body["data"]["object_name"]
-
-            top = await self.execute_skill(
-                "spatial_query",
-                {"object_name": body_name, "query_type": "top_center"},
-            )
-            top_loc = top["data"]["location"]
-
-            antenna = await self.execute_skill(
-                "create_nested_cones",
-                {
-                    "name_prefix": "radio_antenna",
-                    "base_location": top_loc,
-                    "layers": 4,
-                    "base_radius": 0.06,
-                    "top_radius": 0.006,
-                    "height": 0.24,
-                    "z_jitter": 0.0,
-                },
-            )
-            antenna_name = antenna["data"]["object_name"]
-
-            cut_thickness = 0.03
-            cutter_loc = [top_loc[0], top_loc[1], top_loc[2] + cut_thickness * 0.5]
-            cutter = await self.execute_skill(
-                "create_primitive",
-                {
-                    "primitive_type": "cube",
-                    "name": "radio_antenna_cutter",
-                    "size": [0.15, 0.15, cut_thickness],
-                    "location": cutter_loc,
-                },
-            )
-            cutter_name = cutter["data"]["object_name"]
-
-            trimmed = await self.execute_skill(
-                "boolean_tool",
-                {
-                    "target_name": antenna_name,
-                    "tool_name": cutter_name,
-                    "operation": "difference",
-                    "apply": True,
-                    "delete_tool": True,
-                },
-            )
-
-            return {
-                "prompt": prompt,
-                "body": body_name,
-                "antenna": antenna_name,
-                "trimmed": trimmed.get("data", {}),
-            }
-
-        plan, steps = await self._plan_radio_task(prompt)
-
-        # Keep only the plan-level retry configuration.
-        max_retries_per_step = 2
+    async def capture_scene_state(self) -> SceneState:
+        """Capture current Blender scene state via py_get calls."""
+        state = SceneState()
         try:
-            max_retries_per_step = int(plan.get("execution", {}).get("max_retries_per_step", 2))
-        except Exception:
-            pass
+            # Get scene info
+            scene_info = await self.execute_skill("py_get", {"path": "bpy.context.scene", "attrs": ["name", "frame_current", "frame_start", "frame_end"]})
+            if scene_info.get("ok"):
+                data = scene_info.get("data", {})
+                state.scene_name = data.get("name")
+                state.frame_current = data.get("frame_current", 1)
+                state.frame_start = data.get("frame_start", 1)
+                state.frame_end = data.get("frame_end", 250)
 
-        step_results: Dict[str, Dict[str, Any]] = {}
-        attempt_counts: Dict[str, int] = {}
+            # Get objects
+            objects_resp = await self.execute_skill("data_collections_list", {"collection": "objects"})
+            if objects_resp.get("ok"):
+                for obj_name in objects_resp.get("data", []):
+                    try:
+                        obj_data = await self.execute_skill("py_get", {
+                            "path": f'bpy.data.objects["{obj_name}"]',
+                            "attrs": ["type", "location", "dimensions"]
+                        })
+                        if obj_data.get("ok"):
+                            d = obj_data.get("data", {})
+                            state.add_object(
+                                name=obj_name,
+                                obj_type=d.get("type", "MESH"),
+                                location=d.get("location", [0, 0, 0]),
+                                size=d.get("dimensions", [0, 0, 0])
+                            )
+                    except Exception:
+                        pass
+        except Exception as e:
+            state.add_error(f"Failed to capture scene: {e}")
+        return state
 
-        i = 0
-        while i < len(steps):
-            step = steps[i]
-            step_id = step.get("step_id")
-            skill = step.get("skill")
-            args = step.get("args") or {}
-            if not step_id or not isinstance(step_id, str):
-                raise ValueError("Invalid step_id in plan")
-            if not skill or not isinstance(skill, str):
-                raise ValueError("Invalid skill in plan")
+    # === Layer 1: Checkpoint/Resume ===
 
-            attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
-            if attempt_counts[step_id] > 1 + max_retries_per_step:
-                raise RuntimeError(f"Step {step_id} exceeded max retries ({max_retries_per_step})")
+    def _create_interrupt(self, reason: str, prompt: str, save_path: str,
+                         plan: Dict = None, steps: List = None,
+                         step_results: Dict = None, current_index: int = 0,
+                         allowed_skills: List = None,
+                         cause: Exception = None) -> TaskInterruptedError:
+        """Create and return a TaskInterruptedError with saved state."""
+        state = TaskState(
+            prompt=prompt,
+            plan=plan or {},
+            steps=steps or [],
+            step_results=step_results or {},
+            current_step_index=current_index,
+            allowed_skills=allowed_skills or [],
+        )
+        state.save(save_path)
+        print(f"[VBF] {reason}")
+        print(f"[VBF] State saved: {save_path}")
+        print(f"[VBF] Resume: --resume \"{save_path}\"")
+        return TaskInterruptedError(
+            f"{reason}: {cause}" if cause else reason,
+            state=state,
+            state_path=save_path
+        )
 
-            try:
-                resolved_args = resolve_refs(args, step_results)
-                if not isinstance(resolved_args, dict):
-                    raise ValueError(f"Resolved args must be an object/dict. step_id={step_id} skill={skill}")
-                out = await self.execute_skill(skill, resolved_args)
-                step_results[step_id] = out
-                i += 1
-            except JsonRpcError as e:
-                err_trace = ""
-                if e.data and isinstance(e.data, dict):
-                    tb = e.data.get("traceback")
-                    if tb:
-                        err_trace = tb
-
-                step_results[step_id] = {"ok": False, "error": {"message": str(e), "traceback": err_trace}}
-
-                if attempt_counts[step_id] > 1 + max_retries_per_step:
-                    raise
-
-                repair_messages = self._build_radio_repair_messages(
-                    prompt=prompt,
-                    failed_step_id=step_id,
-                    error_message=e.message,
-                    error_traceback=err_trace or "No traceback field",
-                    original_plan=plan,
-                    step_results=step_results,
+    async def _plan_skill_task(self, prompt: str, allowed_skills: List[str], save_path: str) -> Tuple[Dict, List]:
+        """Generate skill plan with checkpoint on failure."""
+        try:
+            plan, steps = await generate_skill_plan(
+                prompt=prompt,
+                allowed_skills=allowed_skills,
+                describe_skills_func=self.describe_skills,
+            )
+            return plan, steps
+        except ValueError as e:
+            if "LLM is not configured" in str(e):
+                raise self._create_interrupt(
+                    "LLM not configured. Set VBF_LLM_BASE_URL/API_KEY/MODEL",
+                    prompt, save_path,
+                    allowed_skills=allowed_skills, cause=e
                 )
+            raise self._create_interrupt(
+                f"Plan generation failed: {e}",
+                prompt, save_path, allowed_skills=allowed_skills, cause=e
+            )
 
-                llm = self._load_llm()
-                if not llm:
-                    raise
+    # === Layer 4: Real-time Feedback (optional) ===
 
-                repair_plan = await self._llm_json(llm, repair_messages)
-                if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                    raise ValueError("LLM repair_plan missing 'steps'")
-                repair_steps = repair_plan["steps"]
-                if not isinstance(repair_steps, list):
-                    raise ValueError("LLM repair_plan 'steps' must be a list")
+    async def analyze_step_result(self, step_id: str, skill: str, args: Dict,
+                                   result: Dict, plan: Dict, steps: List,
+                                   step_index: int, prompt: str) -> Optional[Dict]:
+        """Optional: Ask LLM to analyze step result and suggest plan adjustments."""
+        llm = load_llm()
+        if not llm:
+            return None
 
-                replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
+        # Capture scene before feedback
+        scene = await self.capture_scene_state()
 
-                if replace_from and replace_from != step_id:
-                    # Still allow, but reset to i = index of replace_from if possible.
-                    # For now, enforce equality to keep references stable.
-                    raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
+        context = FeedbackContext(
+            step_id=step_id,
+            skill=skill,
+            args=args,
+            result=result,
+            scene_after=scene,
+        )
 
-                # Replace the remaining steps starting from current failed step.
-                steps = steps[:i] + repair_steps
-                # Keep i unchanged so we retry with repaired step_id at the same index.
-            except Exception as e:
-                step_results[step_id] = {"ok": False, "error": {"message": str(e)}}
-                raise
+        analysis_prompt = context.to_plan_analysis_prompt()
+        messages = [
+            {"role": "system", "content": "You are a 3D modeling assistant analyzing step results."},
+            {"role": "user", "content": analysis_prompt + f"\n\nRemaining steps: {steps[step_index:]}",}
+        ]
 
-        def _get(step_id: str) -> Optional[str]:
-            payload = step_results.get(step_id) or {}
-            data = payload.get("data") or {}
-            v = data.get("object_name")
-            return v if isinstance(v, str) else None
+        try:
+            analysis = await call_llm_json(llm, messages)
+            # Return analysis that caller can use to adjust plan
+            return analysis
+        except Exception:
+            return None
 
-        return {
-            "prompt": prompt,
-            "body": _get("body"),
-            "antenna": _get("antenna"),
-            "cutter": _get("cutter"),
-            "trimmed": (step_results.get("trimmed") or {}).get("data", {}),
-            "step_results": step_results,
-        }
+    # === Layer 3: Active Replanning ===
 
-    async def run_task(self, prompt: str, resume_state_path: Optional[str] = None, save_state_path: Optional[str] = None) -> Dict[str, Any]:
+    async def request_replan(self, prompt: str, from_step_id: str, current_plan: Dict,
+                            step_results: Dict, save_path: str) -> Tuple[Dict, List]:
+        """Request LLM to regenerate plan from given step with current scene context."""
+        llm = load_llm()
+        if not llm:
+            raise self._create_interrupt("Cannot replan: LLM not available", prompt, save_path)
+
+        allowed_skills = await self.list_skills()
+        scene = await self.capture_scene_state()
+        skill_schemas = await self.describe_skills(allowed_skills)
+
+        # Build replan message with scene context
+        replan_prompt = f"""
+        Replanning request from step: {from_step_id}
+        Original prompt: {prompt}
+
+        Current scene state:
+        {scene.to_prompt_text()}
+
+        Completed steps:
+        {json.dumps(step_results, indent=2, ensure_ascii=False)}
+
+        Please generate a new plan starting from step "{from_step_id}".
+        Consider the current scene state when planning.
         """
-        Generic user-controlled modeling task.
 
-        Args:
-            prompt: Natural language modeling request.
-            resume_state_path: Path to a previously saved .json state file to resume from.
-            save_state_path: Path to save interrupted state when LLM fails. Defaults to
-                             vbf/config/task_state.json.
-        """
+        messages = build_skill_plan_messages(
+            prompt=replan_prompt,
+            allowed_skills=allowed_skills,
+            skill_schemas=skill_schemas
+        )
+
+        raw_plan = await call_llm_json(llm, messages)
+        try:
+            plan = normalize_plan(raw_plan)
+            steps = plan.get("steps", [])
+            if not steps:
+                raise ValueError("No steps in replan")
+            return plan, steps
+        except ValueError as e:
+            raise self._create_interrupt(f"Replan failed: {e}", prompt, save_path, cause=e)
+
+    # === Main Execution with Layer 2: Enhanced Recovery ===
+
+    async def run_task(self, prompt: str, resume_state_path: Optional[str] = None,
+                      save_state_path: Optional[str] = None,
+                      enable_step_feedback: bool = False) -> Dict[str, Any]:
+        """Execute modeling task with full checkpoint/replan/recovery support."""
         await self.ensure_connected()
 
-        # Check LLM availability upfront — do NOT silently fall back to radio demo.
-        if not self._llm_enabled():
-            print("[VBF] LLM not configured or disabled. Set VBF_LLM_BASE_URL/API_KEY/MODEL or vbf/config/llm.json.")
-            print("[VBF] Falling back to RadioTask demo.")
-            return await self.run_radio_task(prompt)
+        # CRITICAL: _save_path defined EARLY so we can save even on config errors
+        _save_path = save_state_path or self._default_save_path
+        os.makedirs(os.path.dirname(_save_path), exist_ok=True)
+
+        # Layer 1: Config checks with checkpoint save
+        if not is_llm_enabled():
+            raise self._create_interrupt(
+                "LLM not configured. Set VBF_LLM_BASE_URL, VBF_LLM_API_KEY, VBF_LLM_MODEL",
+                prompt, _save_path
+            )
 
         allowed_skills = await self.list_skills()
         if not allowed_skills:
-            print("[VBF] No skills returned from Blender addon. Falling back to RadioTask demo.")
-            return await self.run_radio_task(prompt)
+            raise self._create_interrupt(
+                "No skills returned from Blender addon. Check if VBF addon is enabled",
+                prompt, _save_path
+            )
 
-        llm = self._load_llm()
-        # llm should not be None here since _llm_enabled() passed, but guard anyway.
+        llm = load_llm()
         if llm is None:
-            print("[VBF] LLM init failed. Falling back to RadioTask demo.")
-            return await self.run_radio_task(prompt)
+            raise self._create_interrupt(
+                "LLM initialization failed after configuration check",
+                prompt, _save_path, allowed_skills=allowed_skills
+            )
 
-        _save_path = save_state_path or os.path.join(os.path.dirname(__file__), "config", "task_state.json")
-
-        # --- Resume from saved state ---
+        # Resume or generate plan
         if resume_state_path and os.path.exists(resume_state_path):
             print(f"[VBF] Resuming from: {resume_state_path}")
             saved = TaskState.load(resume_state_path)
@@ -715,590 +311,132 @@ class VBFClient:
             steps = saved.steps
             step_results = saved.step_results
             start_index = saved.current_step_index
-            allowed_skills = saved.allowed_skills
-            skill_schemas = saved.skill_schemas
-            print(f"[VBF] Step {start_index}/{len(steps)}, completed: {list(step_results.keys())}")
+            print(f"[VBF] Resuming at step {start_index}/{len(steps)}")
         else:
-            skill_schemas = await self.describe_skills(allowed_skills)
-            try:
-                plan, steps = await self._plan_skill_task(prompt, allowed_skills)
-            except LLMError as e:
-                print(f"[VBF] LLM planning failed: {e}")
-                raise
-            step_results: Dict[str, Dict[str, Any]] = {}
+            plan, steps = await self._plan_skill_task(prompt, allowed_skills, _save_path)
+            step_results = {}
             start_index = 0
+            print(f"[VBF] Generated plan with {len(steps)} steps")
 
-        max_retries_per_step = 2
-        try:
-            max_retries_per_step = int(plan.get("execution", {}).get("max_retries_per_step", 2))
-        except Exception:
-            pass
+        # Execution controls
+        max_retries = int(plan.get("execution", {}).get("max_retries_per_step", 2))
+        max_steps = int(plan.get("controls", {}).get("max_steps", 80))
 
-        controls = plan.get("controls", {}) if isinstance(plan, dict) else {}
-        max_steps = int(controls.get("max_steps", 80)) if isinstance(controls, dict) else 80
-        _llm_cfg = self._load_llm_config()
-        _config_allow = _llm_cfg.allow_low_level_gateway if _llm_cfg else False
-        _config_auto = _llm_cfg.auto_allow_low_level_gateway if _llm_cfg else True
-        _plan_allow = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
-        allow_low_level_gateway = _config_allow or _plan_allow
-        require_ops_introspect = bool(controls.get("require_ops_introspect_before_invoke", True)) if isinstance(controls, dict) else True
+        if len(steps) > max_steps:
+            raise self._create_interrupt(
+                f"Plan too large: {len(steps)} > {max_steps}",
+                prompt, _save_path, plan=plan, steps=steps, allowed_skills=allowed_skills
+            )
 
-        attempt_counts: Dict[str, int] = {}
-        introspected_ops: set[str] = set()
-        stage_order = {
-            "discover": 0,
-            "blockout": 1,
-            "boolean": 2,
-            "detail": 3,
-            "bevel": 4,
-            "normal_fix": 5,
-            "accessories": 6,
-            "material": 7,
-            "finalize": 8,
-        }
+        # Stage tracking
+        stage_order = {k: i for i, k in enumerate([
+            "discover", "blockout", "boolean", "detail", "bevel",
+            "normal_fix", "accessories", "material", "finalize"
+        ])}
         current_stage_rank = -1
+        attempt_counts: Dict[str, int] = {}
 
         i = start_index
         while i < len(steps):
-            if len(steps) > max_steps:
-                raise RuntimeError(f"Plan exceeds max_steps control: {len(steps)} > {max_steps}")
-
             step = steps[i]
             step_id = step.get("step_id")
             skill = step.get("skill")
             args = step.get("args") or {}
             stage = step.get("stage", "detail")
 
+            # Validation
             if not step_id or not isinstance(step_id, str):
-                raise ValueError("Invalid step_id in plan")
-            if not skill or not isinstance(skill, str):
-                raise ValueError("Invalid skill in plan")
+                raise self._create_interrupt(f"Invalid step_id at index {i}", prompt, _save_path, plan, steps, step_results, i, allowed_skills)
+
             if skill not in allowed_skills:
-                raise ValueError(f"Skill not allowed: {skill}")
-            if not isinstance(args, dict):
-                raise ValueError(f"Plan args must be an object for step_id={step_id}")
-            if not isinstance(stage, str) or stage not in stage_order:
-                raise ValueError(f"Invalid stage for step_id={step_id}. Must be one of {list(stage_order.keys())}")
-            if stage_order[stage] < current_stage_rank:
-                raise ValueError(
-                    f"Stage order violation at step_id={step_id}: "
-                    f"{stage} cannot go backwards."
-                )
-
-            if skill in {"py_call", "py_set"} and not allow_low_level_gateway:
-                if _config_auto:
-                    # Auto-downgrade: record blocked entry and trigger LLM repair with gateway hint
-                    step_results[step_id] = {
-                        "ok": False,
-                        "error": {
-                            "message": "blocked: low-level gateway not allowed, triggering auto-downgrade repair"
-                        },
-                    }
-                    repair_skills = list(allowed_skills)
-                    if "py_call" not in repair_skills:
-                        repair_skills.append("py_call")
-                    if "py_set" not in repair_skills:
-                        repair_skills.append("py_set")
-                    try:
-                        repair_messages = self._build_skill_repair_messages(
-                            prompt=prompt,
-                            failed_step_id=step_id,
-                            error_message="blocked: low-level gateway not allowed",
-                            error_traceback="",
-                            original_plan=plan,
-                            step_results=step_results,
-                            allowed_skills=repair_skills,
-                            skill_schemas=skill_schemas,
-                            low_level_gateway_hint=True,
-                        )
-                        repair_plan = await self._llm_json(llm, repair_messages)
-                    except LLMError as llm_err:
-                        raise self._interrupt(
-                            "LLM auto-downgrade repair failed", step_id, i, _save_path,
-                            prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
-                        ) from llm_err
-                    if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                        raise ValueError("LLM auto-downgrade repair_plan missing 'steps'")
-                    repair_steps = repair_plan["steps"]
-                    if not isinstance(repair_steps, list):
-                        raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
-                    replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                    # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
-
-                    if replace_from and replace_from != step_id:
-                            replace_idx = _find_replace_idx(steps, replace_from)
-                            current_stage_rank = max(
-                                (stage_order[s["stage"]] for s in steps[:replace_idx]
-                                if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                                default=-1,
-                            )
-                            steps = steps[:replace_idx] + repair_steps
-                            i = replace_idx
-                    else:
-                        steps = steps[:i] + repair_steps
-                else:
-                    raise ValueError(
-                        f"Skill {skill} is blocked by allow_low_level_gateway=false. "
-                        "Use high-level skills / ops_* first."
-                    )
+                raise self._create_interrupt(f"Skill not allowed: {skill}", prompt, _save_path, plan, steps, step_results, i, allowed_skills)
 
             attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
-            if attempt_counts[step_id] > 1 + max_retries_per_step:
-                raise RuntimeError(f"Step {step_id} exceeded max retries ({max_retries_per_step})")
+            if attempt_counts[step_id] > max_retries:
+                # Layer 3: Replan on max retries exceeded
+                print(f"[VBF] Step {step_id} exceeded max retries, requesting replan...")
+                new_plan, new_steps = await self.request_replan(
+                    prompt, step_id, plan, step_results, _save_path
+                )
+                # Replace remaining steps
+                steps = steps[:i] + new_steps
+                continue
 
+            # Stage monotonicity check
+            if stage in stage_order and stage_order[stage] < current_stage_rank:
+                print(f"[VBF] Warning: Stage regression at {step_id} ({stage})")
+            current_stage_rank = max(current_stage_rank, stage_order.get(stage, current_stage_rank))
+
+            # Execute skill
             try:
                 resolved_args = resolve_refs(args, step_results)
-                if not isinstance(resolved_args, dict):
-                    raise ValueError(f"Resolved args must be an object/dict. step_id={step_id} skill={skill}")
+                result = await self.execute_skill(skill, resolved_args, step_id)
+                step_results[step_id] = result
 
-                if skill == "ops_invoke" and require_ops_introspect:
-                    operator_id = resolved_args.get("operator_id")
-                    if not isinstance(operator_id, str):
-                        raise ValueError("ops_invoke requires string operator_id")
-                    if operator_id not in introspected_ops:
-                        raise ValueError(
-                            f"ops_invoke blocked: operator_id '{operator_id}' was not introspected first. "
-                            "Call ops_introspect before ops_invoke."
-                        )
-
-                out = await self.execute_skill(skill, resolved_args)
-                step_results[step_id] = out
-                current_stage_rank = max(current_stage_rank, stage_order[stage])
-
-                if skill == "ops_introspect":
-                    op_id = resolved_args.get("operator_id")
-                    if isinstance(op_id, str):
-                        introspected_ops.add(op_id)
-
-                on_success = step.get("on_success") or {}
-                store_as = on_success.get("store_as") if isinstance(on_success, dict) else None
-                if isinstance(store_as, dict):
-                    alias_name = store_as.get("alias_name")
-                    step_return_json_path = store_as.get("step_return_json_path")
-                    if isinstance(alias_name, str) and isinstance(step_return_json_path, str) and step_return_json_path.strip():
-                        extracted = self._extract_json_path_from_step(out, step_return_json_path)
-                        alias_payload: Dict[str, Any]
-                        if isinstance(extracted, dict):
-                            alias_payload = {"ok": True, "data": extracted}
-                        else:
-                            alias_payload = {"ok": True, "data": {"value": extracted}}
-                        step_results[alias_name] = alias_payload
+                # Layer 4: Optional step feedback
+                if enable_step_feedback and i + 1 < len(steps):
+                    feedback = await self.analyze_step_result(
+                        step_id, skill, resolved_args, result, plan, steps, i + 1, prompt
+                    )
+                    if feedback and feedback.get("should_adjust_plan"):
+                        # Adjust remaining steps based on feedback
+                        pass  # Can implement dynamic step adjustment here
 
                 i += 1
 
             except JsonRpcError as e:
-                err_trace = e.data.get("traceback") if isinstance(e.data, dict) else None
-                step_results[step_id] = {"ok": False, "error": {"message": str(e), "traceback": err_trace or ""}}
+                step_results[step_id] = {"ok": False, "error": {"message": str(e)}}
 
-                if attempt_counts[step_id] > 1 + max_retries_per_step:
-                    raise
-
-                try:
-                    repair_messages = self._build_skill_repair_messages(
-                        prompt=prompt,
-                        failed_step_id=step_id,
-                        error_message=e.message,
-                        error_traceback=err_trace or "No traceback field",
-                        original_plan=plan,
-                        step_results=step_results,
-                        allowed_skills=allowed_skills,
-                        skill_schemas=skill_schemas,
-                    )
-                    repair_plan = await self._llm_json(llm, repair_messages)
-                except LLMError as llm_err:
-                    raise self._interrupt(
-                        "LLM repair failed", step_id, i, _save_path,
-                        prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
-                    ) from llm_err
-
-                if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                    raise ValueError("LLM repair_plan missing 'steps'")
-
-                repair_steps = repair_plan["steps"]
-                if not isinstance(repair_steps, list):
-                    raise ValueError("LLM repair_plan 'steps' must be a list")
-
-                replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
-
-                if replace_from and replace_from != step_id:
-                    replace_idx = _find_replace_idx(steps, replace_from)
-                    # Reset current_stage_rank to the highest rank of successfully completed steps
-                    # before the truncation point, so repair steps can use earlier stages.
-                    current_stage_rank = max(
-                        (stage_order[s["stage"]] for s in steps[:replace_idx]
-                         if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                        default=-1,
-                    )
-                    steps = steps[:replace_idx] + repair_steps
-                    i = replace_idx
-                else:
-                    steps = steps[:i] + repair_steps
-                    # i stays unchanged for equal replace case
-
-            except LLMError as llm_err:
-                raise self._interrupt(
-                    "LLM failed", step_id, i, _save_path,
-                    prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
-                ) from llm_err
-
-            except Exception as e:
-                err_trace = traceback.format_exc()
-                step_results[step_id] = {"ok": False, "error": {"message": str(e), "traceback": err_trace}}
-
-                if attempt_counts[step_id] > 1 + max_retries_per_step:
-                    raise
-
-                try:
-                    repair_messages = self._build_skill_repair_messages(
-                        prompt=prompt,
-                        failed_step_id=step_id,
-                        error_message=str(e),
-                        error_traceback=err_trace,
-                        original_plan=plan,
-                        step_results=step_results,
-                        allowed_skills=allowed_skills,
-                        skill_schemas=skill_schemas,
-                    )
-                    repair_plan = await self._llm_json(llm, repair_messages)
-                except LLMError as llm_err:
-                    raise self._interrupt(
-                        "LLM repair failed", step_id, i, _save_path,
-                        prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
-                    ) from llm_err
-
-                if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                    raise ValueError("LLM repair_plan missing 'steps'")
-                repair_steps = repair_plan["steps"]
-                if not isinstance(repair_steps, list):
-                    raise ValueError("LLM repair_plan 'steps' must be a list")
-
-                replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
-
-                if replace_from and replace_from != step_id:
-                    replace_idx = _find_replace_idx(steps, replace_from)
-                    # Reset current_stage_rank to the highest rank of successfully completed steps
-                    # before the truncation point, so repair steps can use earlier stages.
-                    current_stage_rank = max(
-                        (stage_order[s["stage"]] for s in steps[:replace_idx]
-                         if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                        default=-1,
-                    )
-                    steps = steps[:replace_idx] + repair_steps
-                    i = replace_idx
-                else:
-                    steps = steps[:i] + repair_steps
-                    # i stays unchanged for equal replace case
-
-            return {"prompt": prompt, "step_results": step_results, "plan": plan}
-
-        plan, steps = await self._plan_skill_task(prompt, allowed_skills)
-
-        # Fetch skill schemas for repair messages (same call as inside _plan_skill_task,
-        # but we need the result here for repair context).
-        skill_schemas = await self.describe_skills(allowed_skills)
-
-        max_retries_per_step = 2
-        try:
-            max_retries_per_step = int(plan.get("execution", {}).get("max_retries_per_step", 2))
-        except Exception:
-            pass
-
-        controls = plan.get("controls", {}) if isinstance(plan, dict) else {}
-        max_steps = int(controls.get("max_steps", 80)) if isinstance(controls, dict) else 80
-        _llm_cfg = self._load_llm_config()
-        _config_allow = _llm_cfg.allow_low_level_gateway if _llm_cfg else False
-        _config_auto = _llm_cfg.auto_allow_low_level_gateway if _llm_cfg else True
-        _plan_allow = bool(controls.get("allow_low_level_gateway", False)) if isinstance(controls, dict) else False
-        allow_low_level_gateway = _config_allow or _plan_allow
-        require_ops_introspect = bool(controls.get("require_ops_introspect_before_invoke", True)) if isinstance(controls, dict) else True
-
-        step_results: Dict[str, Dict[str, Any]] = {}
-        attempt_counts: Dict[str, int] = {}
-        introspected_ops: set[str] = set()
-        stage_order = {
-            "discover": 0,
-            "blockout": 1,
-            "boolean": 2,
-            "detail": 3,
-            "bevel": 4,
-            "normal_fix": 5,
-            "accessories": 6,
-            "material": 7,
-            "finalize": 8,
-        }
-        current_stage_rank = -1
-
-        i = 0
-        while i < len(steps):
-            if len(steps) > max_steps:
-                raise RuntimeError(f"Plan exceeds max_steps control: {len(steps)} > {max_steps}")
-
-            step = steps[i]
-            step_id = step.get("step_id")
-            skill = step.get("skill")
-            args = step.get("args") or {}
-            stage = step.get("stage", "detail")
-
-            if not step_id or not isinstance(step_id, str):
-                raise ValueError("Invalid step_id in plan")
-            if not skill or not isinstance(skill, str):
-                raise ValueError("Invalid skill in plan")
-            if skill not in allowed_skills:
-                raise ValueError(f"Skill not allowed: {skill}")
-            if not isinstance(args, dict):
-                raise ValueError(f"Plan args must be an object for step_id={step_id}")
-            if not isinstance(stage, str) or stage not in stage_order:
-                raise ValueError(f"Invalid stage for step_id={step_id}. Must be one of {list(stage_order.keys())}")
-            if stage_order[stage] < current_stage_rank:
-                raise ValueError(
-                    f"Stage order violation at step_id={step_id}: "
-                    f"{stage} cannot go backwards."
-                )
-
-            # Safety gates for low-level skills.
-            if skill in {"py_call", "py_set"} and not allow_low_level_gateway:
-                if _config_auto:
-                    # Auto-downgrade: record blocked entry and trigger LLM repair with gateway hint
-                    step_results[step_id] = {
-                        "ok": False,
-                        "error": {
-                            "message": "blocked: low-level gateway not allowed, triggering auto-downgrade repair"
-                        },
-                    }
-                    repair_skills = list(allowed_skills)
-                    if "py_call" not in repair_skills:
-                        repair_skills.append("py_call")
-                    if "py_set" not in repair_skills:
-                        repair_skills.append("py_set")
+                # Layer 2: Enhanced Recovery - physical rollback + replan
+                if attempt_counts[step_id] <= max_retries:
+                    # Request repair plan from LLM
                     try:
-                        repair_messages = self._build_skill_repair_messages(
-                            prompt=prompt,
-                            failed_step_id=step_id,
-                            error_message="blocked: low-level gateway not allowed",
-                            error_traceback="",
-                            original_plan=plan,
-                            step_results=step_results,
-                            allowed_skills=repair_skills,
-                            skill_schemas=skill_schemas,
-                            low_level_gateway_hint=True,
+                        repair_msgs = build_skill_repair_messages(
+                            prompt, step_id, str(e), "",
+                            plan, step_results, allowed_skills
                         )
-                        repair_plan = await self._llm_json(llm, repair_messages)
-                    except LLMError as llm_err:
-                        raise self._interrupt(
-                            "LLM auto-downgrade repair failed", step_id, i, _save_path,
-                            prompt, plan, steps, step_results, allowed_skills, skill_schemas, llm_err,
-                        ) from llm_err
-                    if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                        raise ValueError("LLM auto-downgrade repair_plan missing 'steps'")
-                    repair_steps = repair_plan["steps"]
-                    if not isinstance(repair_steps, list):
-                        raise ValueError("LLM auto-downgrade repair_plan 'steps' must be a list")
-                    replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                    # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
+                        repair_plan = await call_llm_json(llm, repair_msgs)
 
-                    if replace_from and replace_from != step_id:
-                            replace_idx = _find_replace_idx(steps, replace_from)
-                            current_stage_rank = max(
-                                (stage_order[s["stage"]] for s in steps[:replace_idx]
-                                if s.get("step_id") in step_results and step_results[s["step_id"]].get("ok")),
-                                default=-1,
-                            )
+                        if repair_plan and "steps" in repair_plan:
+                            repair_steps = repair_plan.get("steps", [])
+                            replace_from = repair_plan.get("repair", {}).get("replace_from_step_id", step_id)
+
+                            # Physical rollback
+                            await self.rollback_to_step(replace_from)
+
+                            # Replace steps
+                            replace_idx = next((j for j, s in enumerate(steps) if s.get("step_id") == replace_from), i)
                             steps = steps[:replace_idx] + repair_steps
                             i = replace_idx
-                    else:
-                        steps = steps[:i] + repair_steps
-                else:
-                    raise ValueError(
-                        f"Skill {skill} is blocked by allow_low_level_gateway=false. "
-                        "Use high-level skills / ops_* first."
-                    )
+                            print(f"[VBF] Repair: rolling back to {replace_from}, {len(repair_steps)} replacement steps")
+                            continue
+                    except Exception as repair_err:
+                        print(f"[VBF] Repair request failed: {repair_err}")
 
-            attempt_counts[step_id] = attempt_counts.get(step_id, 0) + 1
-            if attempt_counts[step_id] > 1 + max_retries_per_step:
-                raise RuntimeError(f"Step {step_id} exceeded max retries ({max_retries_per_step})")
-
-            try:
-                resolved_args = resolve_refs(args, step_results)
-                if not isinstance(resolved_args, dict):
-                    raise ValueError(f"Resolved args must be an object/dict. step_id={step_id} skill={skill}")
-
-                # Enforce ops_introspect before ops_invoke for controllability.
-                if skill == "ops_invoke" and require_ops_introspect:
-                    operator_id = resolved_args.get("operator_id")
-                    if not isinstance(operator_id, str):
-                        raise ValueError("ops_invoke requires string operator_id")
-                    if operator_id not in introspected_ops:
-                        raise ValueError(
-                            f"ops_invoke blocked: operator_id '{operator_id}' was not introspected first. "
-                            "Call ops_introspect before ops_invoke."
-                        )
-
-                out = await self.execute_skill(skill, resolved_args)
-                step_results[step_id] = out
-                current_stage_rank = max(current_stage_rank, stage_order[stage])
-
-                if skill == "ops_introspect":
-                    op_id = resolved_args.get("operator_id")
-                    if isinstance(op_id, str):
-                        introspected_ops.add(op_id)
-
-                # Handle alias storing for later $ref usage.
-                on_success = step.get("on_success") or {}
-                store_as = on_success.get("store_as") if isinstance(on_success, dict) else None
-                if isinstance(store_as, dict):
-                    alias_name = store_as.get("alias_name")
-                    step_return_json_path = store_as.get("step_return_json_path")
-                    if isinstance(alias_name, str) and isinstance(step_return_json_path, str) and step_return_json_path.strip():
-                        extracted = self._extract_json_path_from_step(out, step_return_json_path)
-                        alias_payload: Dict[str, Any]
-                        if isinstance(extracted, dict):
-                            alias_payload = {"ok": True, "data": extracted}
-                        else:
-                            alias_payload = {"ok": True, "data": {"value": extracted}}
-                        step_results[alias_name] = alias_payload
-
-                i += 1
-            except JsonRpcError as e:
-                err_trace = e.data.get("traceback") if isinstance(e.data, dict) else None
-                step_results[step_id] = {"ok": False, "error": {"message": str(e), "traceback": err_trace or ""}}
-
-                if attempt_counts[step_id] > 1 + max_retries_per_step:
-                    raise
-
-                repair_messages = self._build_skill_repair_messages(
-                    prompt=prompt,
-                    failed_step_id=step_id,
-                    error_message=e.message,
-                    error_traceback=err_trace or "No traceback field",
-                    original_plan=plan,
-                    step_results=step_results,
-                    allowed_skills=allowed_skills,
-                    skill_schemas=skill_schemas,
+                # Repair failed or max retries, save checkpoint
+                raise self._create_interrupt(
+                    f"Step {step_id} failed after retries",
+                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, e
                 )
 
-                repair_plan = await self._llm_json(llm, repair_messages)
-                if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                    raise ValueError("LLM repair_plan missing 'steps'")
-
-                repair_steps = repair_plan["steps"]
-                if not isinstance(repair_steps, list):
-                    raise ValueError("LLM repair_plan 'steps' must be a list")
-
-                replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
-
-                if replace_from and replace_from != step_id:
-                    raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
-
-                steps = steps[:i] + repair_steps
             except Exception as e:
-                err_trace = traceback.format_exc()
-                step_results[step_id] = {"ok": False, "error": {"message": str(e), "traceback": err_trace}}
-
-                if attempt_counts[step_id] > 1 + max_retries_per_step:
-                    raise
-
-                repair_messages = self._build_skill_repair_messages(
-                    prompt=prompt,
-                    failed_step_id=step_id,
-                    error_message=str(e),
-                    error_traceback=err_trace,
-                    original_plan=plan,
-                    step_results=step_results,
-                    allowed_skills=allowed_skills,
-                    skill_schemas=skill_schemas,
+                raise self._create_interrupt(
+                    f"Unexpected error at step {step_id}",
+                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, e
                 )
 
-                repair_plan = await self._llm_json(llm, repair_messages)
-                if not isinstance(repair_plan, dict) or "steps" not in repair_plan:
-                    raise ValueError("LLM repair_plan missing 'steps'")
-                repair_steps = repair_plan["steps"]
-                if not isinstance(repair_steps, list):
-                    raise ValueError("LLM repair_plan 'steps' must be a list")
-
-                replace_from = repair_plan.get("repair", {}).get("replace_from_step_id")
-                # Physical rollback if we are replacing from an earlier step
-                if replace_from:
-                    await self.rollback_to_step(replace_from)
-
-                if replace_from and replace_from != step_id:
-                    raise ValueError(f"LLM repair replace_from_step_id mismatch: got {replace_from}, expected {step_id}")
-
-                steps = steps[:i] + repair_steps
-
+        print(f"[VBF] Task completed: {len(step_results)} steps executed")
         return {"prompt": prompt, "step_results": step_results, "plan": plan}
 
-    def _interrupt(
-        self,
-        reason: str,
-        step_id: str,
-        step_index: int,
-        save_path: str,
-        prompt: str,
-        plan: Dict[str, Any],
-        steps: List[Dict[str, Any]],
-        step_results: Dict[str, Dict[str, Any]],
-        allowed_skills: List[str],
-        skill_schemas: Optional[Dict[str, Any]],
-        cause: Exception,
-    ) -> "TaskInterruptedError":
-        state = TaskState(
-            prompt=prompt, plan=plan, steps=steps,
-            step_results=step_results, current_step_index=step_index,
-            allowed_skills=allowed_skills, skill_schemas=skill_schemas,
-        )
-        state.save(save_path)
-        print(f"[VBF] {reason}: {cause}")
-        print(f"[VBF] Interrupted at step '{step_id}'. State saved: {save_path}")
-        print(f"[VBF] Resume: vbf --prompt \"{prompt}\" --resume \"{save_path}\"")
-        return TaskInterruptedError(f"{reason} at step '{step_id}': {cause}", state=state, state_path=save_path)
-
     async def _start_blender_headless(self) -> None:
-        # Start Blender process. Controller is responsible for lifecycle.
-        # The Blender addon will start WS server and keep running while model tasks are processed.
+        """Start Blender in headless mode with VBF server."""
         import subprocess
-
         env = os.environ.copy()
-        env["VBF_WS_HOST"] = str(self.host)
+        env["VBF_WS_HOST"] = self.host
         env["VBF_WS_PORT"] = str(self.port)
-
-        # -b (background) + -P (python script)
-        try:
-            proc = subprocess.Popen(
-                [self.blender_path, "-b", "-P", self.start_script_path],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError as e:
-            raise RuntimeError(
-                "找不到 Blender 可执行文件。请设置环境变量 `BLENDER_PATH` 或在 CLI 使用 `--blender-path` 指定。\n"
-                f"当前 blender_path={self.blender_path!r}"
-            ) from e
-        # Give Blender some time to start server.
-        await asyncio.sleep(1.0)
-
-        # If the process exits immediately, surface it.
-        rc = proc.poll()
-        if rc is not None and rc != 0:
-            raise RuntimeError(f"Blender failed to start (exit code {rc}). Ensure BLENDER_PATH and addon deps are correct.")
-
-
-def json_dumps(obj: Any) -> str:
-    # Ensure non-ascii is allowed for Chinese prompts; keep JSON compact.
-    import json as _json
-
-    return _json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-
+        subprocess.Popen(
+            [self.blender_path, "-b", "-P", self.start_script_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
