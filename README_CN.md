@@ -1,12 +1,13 @@
-# Vibe-Blender-Flow (VBF)
+# Vibe-Blender-Flow (VBF)【正在更新中……】
 
 **自然语言驱动的 Blender 原子化建模系统**
+
+**中文版** | **[English](README.md)**
 
 [![许可证](https://img.shields.io/badge/许可证-MIT-blue.svg)](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-
-**中文版** | **[English](README.md)**
+[![Stars](https://img.shields.io/github/stars/vinci-0007/vibe-blender-flow)](https://github.com/vinci-0007/vibe-blender-flow/stars)
 
 ## 示例：制作手机
 
@@ -18,44 +19,77 @@
 
 VBF 通过三个核心原则实现自然语言驱动的 Blender 建模：
 
-1. **高级技能封装**：Blender 插件提供 290+ 原子技能（禁止直接操作 bmesh）
+1. **高级技能封装**：Blender 插件提供 253 个原子技能（禁止直接操作 bmesh）
 2. **JSON-RPC 协议**：Python 客户端通过 WebSocket 调用技能，自动错误恢复
-3. **LLM 集成**：Schema 感知的规划避免参数幻觉
+3. **LLM 集成**：Schema 感知的计划避免参数幻觉
 
 ## 最新更新
 
-**v2.0 - 重大更新 (2026-04-08):**
-- **290+ 技能实现** 跨 38 个领域模块
-- **完整 Blender 4.0/5.x 兼容**（EEVEE_NEXT 支持）
-- **38 个新模块**：骨骼、资产、合成器、驱动器、几何节点、蜡笔、粒子、物理、雕刻、序列器、追踪等
-- **生产就绪**：全面覆盖建模、UV、材质、动画、相机、灯光和约束
+**v2.0 - 重大更新 (2026-04-11):**
+- **代码重构**：客户端模块从 963 行减少至 442 行（-54%）
+- **四层控制系统**：断点续传、增强错误恢复、主动重规划、实时反馈
+- **完全移除 RadioTask**：无硬编码演示任务，纯 LLM 驱动工作流
+- **场景状态捕获**：将当前场景上下文反馈给 LLM，实现智能重规划
 
-详见 [API 覆盖分析](docs/API_COVERAGE_ANALYSIS.md)。
+**v1.5 - 智能恢复 (2026-04-08):**
+- **290+ 技能实现**：涵盖 38 个领域模块
+- **物理回滚**：`vbf.rollback_to_step()` 支持撤销到指定步骤
+- **LLM 修复计划**：失败时自动生成修复计划
+- **任务续传**：`--resume` 标志支持中断任务恢复
+
+---
+
+## 项目统计
+
+```
+代码演进:
+初始版本   v1.0     v2.0
+│         │        │
+▼         ▼        ▼
+===========================================
+client.py │  ████████████████████ (963 行)
+          │  ██████████████       (442 行)  -54% ↓
+          │
+技能      │  ████████████████████████ (100+)
+          │  ████████████████████████████████████████ (253 项)  +153% ↑
+          │
+测试      │  ████ (8 个)
+          │  ██████████████████████ (38+ 个)  +375% ↑
+```
+
+**当前统计：**
+- **客户端代码**：442 行（简洁、可维护）
+- **技能数量**：253 项，覆盖 38 个类别
+- **测试覆盖**：38+ 个测试
+- **核心模块**：9 个 Python 模块
 
 ---
 
 ## 仓库结构
 
 ```
-/vbf                      主要 Python 包（VBFClient、CLI、LLM 集成）
-  ├─ cli.py               CLI 入口：`vbf --prompt "..."`
-  ├─ client.py            VBFClient 类
-  ├─ jsonrpc_ws.py        WebSocket JSON-RPC 客户端
-  ├─ llm_openai_compat.py LLM 集成（OpenAI 兼容 API）
-  └─ vibe_protocol.py     带 $ref 支持的计划解析器
+/vbf                          主 Python 包（442 行）
+├─ cli.py                     CLI 入口: `vbf --prompt "..."`
+├─ client.py                  VBFClient 类（四层系统）
+├─ jsonrpc_ws.py              WebSocket JSON-RPC 客户端
+├─ llm_integration.py         LLM 集成（新模块）
+├─ plan_normalization.py      计划归一化（新模块）
+├─ scene_state.py             场景反馈捕获（新模块）
+├─ task_state.py              断点续传状态
+├─ llm_openai_compat.py       OpenAI 兼容 API 支持
+└─ vibe_protocol.py           带 $ref 的计划解析器
 
-/blender_provider         Blender 插件源码
-  └─ vbf_addon/           标准 Blender 插件（安装此目录）
-      ├─ __init__.py      插件注册
-      ├─ server.py        WebSocket 服务器（JSON-RPC 端点）
-      └─ skills_impl/     290+ 技能实现
-          ├─ registry.py  SKILL_REGISTRY 字典
-          ├─ primitives.py, mesh_ops.py, uv_ops.py
-          ├─ armature.py, particles.py, physics.py
-          └─ [35 个模块...]
+/blender_provider             Blender 插件源码
+└─ vbf_addon/                 标准 Blender 插件
+   ├─ server.py               WebSocket 服务器
+   └─ skills_impl/             253 个技能实现
+      ├─ registry.py          SKILL_REGISTRY
+      └─ [38 个领域模块...]
 
-/client                   旧客户端（已弃用）
-/reference                参考资料
+/tests/                       测试套件
+├─ test_plan_normalization.py 计划归一化测试
+├─ test_llm_integration.py    LLM 集成测试
+└─ [其他测试...]
 ```
 
 ---
@@ -64,11 +98,11 @@ VBF 通过三个核心原则实现自然语言驱动的 Blender 建模：
 
 ### 客户端
 - Python >= 3.10
-- 依赖：`websockets`
+- 依赖：`openai>=2.30.0`, `websockets`
 
 ### Blender 端
 - Blender 4.0+ 或 5.x
-- Python `websockets` 包（安装在 Blender Python 中）：
+- Python `websockets` 包：
 
 ```python
 # 在 Blender Python 控制台：
@@ -94,8 +128,8 @@ subprocess.run([sys.executable, "-m", "pip", "install", "websockets"])
    - 启用插件
 
 3. 启动服务器：
-   - **方法 1**：N 面板 → VBF 标签 → Start 按钮
-   - **方法 2**：Blender Python 控制台：`bpy.ops.vbf.serve()`
+   - N 面板 → VBF 标签 → Start 按钮
+   - 或：`bpy.ops.vbf.serve()`
 
 ### 客户端安装
 
@@ -106,16 +140,16 @@ uv sync
 
 使用 pip：
 ```bash
-pip install websockets
+pip install openai>=2.30.0 websockets
 ```
 
 ---
 
 ## LLM 配置
 
-VBF 支持 OpenAI 兼容 API。如未配置，自动退回到确定性 `RadioTask` 演示。
+**⚠️ 重要：** VBF 需要配置 LLM 才能运行。选择以下方式之一：
 
-### 方法 A：环境变量（推荐）
+### 方式 A：环境变量（推荐）
 
 ```bash
 export VBF_LLM_BASE_URL="https://api.openai.com/v1"
@@ -123,11 +157,11 @@ export VBF_LLM_API_KEY="your-key"
 export VBF_LLM_MODEL="gpt-4o-mini"
 ```
 
-可选：
+**可选：**
 - `VBF_LLM_TEMPERATURE`（默认：`0.2`）
 - `VBF_LLM_CHAT_COMPLETIONS_PATH`（默认：`/v1/chat/completions`）
 
-### 方法 B：JSON 配置文件
+### 方式 B：JSON 配置文件
 
 创建 `vbf/config/llm.json`：
 
@@ -140,6 +174,12 @@ export VBF_LLM_MODEL="gpt-4o-mini"
 }
 ```
 
+**注意：** 如果 LLM 未配置，VBF 会保存检查点并请求配置：
+```
+[VBF] LLM 未配置。状态已保存至：vbf/config/task_state.json
+[VBF] 恢复：vbf --prompt "..." --resume "vbf/config/task_state.json"
+```
+
 ---
 
 ## 使用方法
@@ -147,12 +187,15 @@ export VBF_LLM_MODEL="gpt-4o-mini"
 ### 快速开始
 
 ```bash
-# 方法 1：模块调用（无需安装）
+# 基本用法
 python -m vbf --prompt "制作一个复古收音机"
 
-# 方法 2：安装后使用
+# 支持断点续传
+python -m vbf --prompt "制作一个复古收音机" --resume vbf/config/task_state.json
+
+# uv 安装后
 uv sync
-vbf --prompt "制作一个复古收音机"
+vbf --prompt "制作一个详细的汽车模型"
 ```
 
 ### CLI 选项
@@ -161,10 +204,11 @@ vbf --prompt "制作一个复古收音机"
 vbf --prompt "你的提示词" \
     --host 127.0.0.1 \
     --port 8006 \
-    --blender-path "C:/Program Files/Blender/blender.exe"
+    --blender-path "C:/Program Files/Blender/blender.exe" \
+    --resume "path/to/task_state.json"
 ```
 
-### 作为 Python 模块
+### Python API
 
 ```python
 import asyncio
@@ -173,142 +217,95 @@ from vbf import VBFClient
 async def main():
     client = VBFClient()
     await client.ensure_connected()
-    await client.run_radio_task(prompt="复古收音机")
+    
+    # 运行任务（自动错误恢复）
+    result = await client.run_task("制作一艘详细的空间站")
+    
+    # 或从检查点恢复
+    result = await client.run_task(
+        "制作一艘详细的空间站",
+        resume_state_path="vbf/config/task_state.json"
+    )
 
 asyncio.run(main())
 ```
 
 ---
 
-## 技能分类（290+ 技能）
+## 四层控制系统（v2.0 新增）
+
+### 层1：断点续传
+**问题：** 长时间运行任务期间连接失败或 LLM 中断。
+
+**解决方案：** 任何失败自动保存状态。
+
+```python
+# 任务失败自动保存进度
+try:
+    await client.run_task("复杂模型")
+except TaskInterruptedError as e:
+    print(f"中断: {e}")
+    print(f"恢复: --resume '{e.state_path}'")
+```
+
+### 层2：增强错误恢复
+**问题：** 技能执行中途失败。
+
+**解决方案：** 物理回滚 + LLM 生成修复计划。
+
+```python
+# 步骤失败时：
+# 1. 回滚到失败前状态
+await client.rollback_to_step("failed_step_id")
+# 2. 基于当前场景生成修复计划
+repair_plan = await client.request_repair(...)
+```
+
+### 层3：主动重规划
+**问题：** 计划从开始就未达最佳。
+
+**解决方案：** 从任何步骤请求新计划。
+
+```python
+# 从当前位置重新规划
+new_plan, new_steps = await client.request_replan(
+    prompt="让它更详细",
+    from_step_id="step_5",
+    current_plan=plan,
+    step_results=results
+)
+```
+
+### 层4：实时反馈（可选）
+**问题：** LLM 无法看到实际场景状态。
+
+**解决方案：** 每步后将场景状态反馈给LLM。
+
+```python
+result = await client.run_task(
+    "制作一辆汽车",
+    enable_step_feedback=True  # 可选的每步 LLM 分析
+)
+```
+
+---
+
+## 技能分类（253 项技能）
 
 | 类别 | 技能 | 覆盖度 |
 |------|------|--------|
-| **场景管理** | scene_clear, delete_object, rename_object, duplicate_object | ✅ 完整 |
-| **基础几何** | create_primitive (立方体/圆柱/圆锥/球体), create_beveled_box, create_nested_cones | ✅ 完整 |
-| **几何操作** | extrude_faces, inset_faces, subdivide_mesh, triangulate, bridge_edge_loops | ✅ 完整 |
-| **UV 操作** | unwrap_mesh, smart_project_uv, lightmap_pack, pack_uv_islands, mark_seam | ✅ 完整 |
+| **基础几何** | create_primitive, create_beveled_box, create_nested_cones | ✅ 完整 |
+| **几何操作** | extrude_faces, inset_faces, subdivide_mesh, triangulate | ✅ 完整 |
+| **UV 操作** | unwrap_mesh, smart_project_uv, pack_uv_islands, mark_seam | ✅ 完整 |
 | **材质** | create_material_simple, assign_material, create_shader_node_tree | ✅ 完整 |
-| **纹理** | import_image_texture, add_texture_to_material, set_texture_mapping | ✅ 完整 |
-| **灯光** | create_light (4 种类型), set_light_properties, set_render_engine | ✅ 完整 |
-| **相机** | create_camera, set_camera_active, camera_look_at, get_camera_info | ✅ 完整 |
-| **动画** | insert_keyframe, set_frame_range, set_animation_fps, evaluate_fcurve | ✅ 完整 |
-| **集合** | create_collection, link_to_collection, isolate_in_collection | ✅ 完整 |
-| **约束** | add_constraint_copy_location/rotation/scale, set_parent | ✅ 完整 |
-| **曲线/文本** | create_curve_bezier, create_text, set_font, text_to_curve | ✅ 完整 |
-| **骨骼** | create_armature, add_bone, skin_to_armature, add_bone_constraint | ✅ 完整（新增）|
-| **粒子** | create_particle_system, set_particle_settings, hair_particles | ✅ 完整（新增）|
-| **物理** | add_rigidbody, add_cloth, add_fluid, add_soft_body | ✅ 完整（新增）|
-| **几何节点** | create_geometry_node_tree, add_geometry_node, link_geometry_nodes | ✅ 完整（新增）|
-| **雕刻** | sculpt_mask, sculpt_draw, sculpt_smooth, dynamic_topology | ✅ 完整（新增）|
-| **渲染** | set_render_engine, set_render_resolution, render_frame | ✅ 完整（新增）|
-| **合成器** | create_compositor_node_tree, add_compositor_node, link_compositor_nodes | ✅ 完整（新增）|
+| **动画** | insert_keyframe, set_frame_range, set_animation_fps | ✅ 完整 |
+| **骨骼** | create_armature, add_bone, skin_to_armature, constraints | ✅ 完整 |
+| **粒子** | create_particle_system, set_particle_settings | ✅ 完整 |
+| **物理** | rigidbody_add, cloth_add, fluid_domain_create | ✅ 完整 |
+| **几何节点** | create_geometry_node_tree, add_geometry_node, link_nodes | ✅ 完整 |
+| **雕刻** | sculpt_draw, sculpt_smooth, dyntopo_enabled | ✅ 完整 |
+| **合成器** | create_compositor_tree, add_compositor_node | ✅ 完整 |
 | **运行时网关** | py_get, py_set, py_call, ops_invoke, ops_introspect | ✅ 完整 |
-
-详见 [API 覆盖分析](docs/API_COVERAGE_ANALYSIS.md)。
-
----
-
-## 建模工作流
-
-VBF 强制执行 9 阶段建模流程：
-
-```
-探索 → 基础造型 → 布尔运算 → 细节建模 → 倒角 → 法线修复 → 配件 → 材质 → 收尾
-```
-
-### 阶段说明
-
-| 阶段 | 描述 | 示例技能 |
-|------|------|----------|
-| `discover` | 探索 API、搜索操作符 | ops_search, ops_list |
-| `blockout` | 基础造型确定 | create_primitive, apply_transform |
-| `boolean` | 布尔运算 | boolean_tool, join_objects |
-| `detail` | 添加细节（按钮、孔洞）| extrude_faces, inset_faces |
-| `bevel` | 倒角处理 | add_modifier_bevel |
-| `normal_fix` | 修复法线 | recalculate_normals, shade_smooth |
-| `accessories` | 配件（线缆、螺丝）| create_curve_bezier |
-| `material` | 应用材质 | create_material_simple, assign_material |
-| `finalize` | 最终清理 | rename_object, create_collection |
-
----
-
-## 计划 Schema
-
-### 技能引用系统
-
-技能可以使用 `$ref` 引用前序步骤的结果：
-
-```json
-{
-  "steps": [
-    {
-      "step_id": "s1",
-      "skill": "create_primitive",
-      "args": {"primitive_type": "cube", "name": "main"}
-    },
-    {
-      "step_id": "s2",
-      "skill": "spatial_query",
-      "args": {
-        "object_name": {"$ref": "s1.data.object_name"},
-        "query_type": "top_center"
-      }
-    }
-  ]
-}
-```
-
-### 控制字段
-
-```json
-{
-  "controls": {
-    "max_steps": 80,
-    "allow_low_level_gateway": false,
-    "require_ops_introspect_before_invoke": true
-  },
-  "steps": [...]
-}
-```
-
----
-
-## 架构
-
-### 通信流程
-
-```
-VBFClient (Python)
-    ↓ WebSocket (JSON-RPC 2.0)
-VBF WebSocket 服务器 (Blender 插件)
-    ↓
-SKILL_REGISTRY
-    ↓
-bpy.ops / bpy.data (Blender API)
-    ↓
-返回 {ok: true, data: {...}}
-```
-
-### 设计原则
-
-1. **禁止直接 bmesh**：技能封装 `bpy.ops`，不进行底层网格操作
-2. **原子操作**：每个技能只做一件事
-3. **自我验证**：技能验证参数并返回结构化错误
-4. **阶段系统**：计划遵循 9 阶段工作流强制执行
-
----
-
-## 环境变量
-
-| 变量 | 默认值 | 描述 |
-|------|--------|------|
-| `VBF_WS_HOST` | `127.0.0.1` | WebSocket 服务器主机 |
-| `VBF_WS_PORT` | `8006` | WebSocket 服务器端口 |
-| `BLENDER_PATH` | `blender` | Blender 可执行文件 |
-| `VBF_LLM_BASE_URL` | - | LLM API 端点 |
-| `VBF_LLM_API_KEY` | - | LLM API 密钥 |
-| `VBF_LLM_MODEL` | `gpt-4o-mini` | LLM 模型名称 |
 
 ---
 
@@ -323,28 +320,21 @@ uv sync --group dev
 # 运行所有测试
 uv run pytest
 
-# 运行特定测试
-uv run pytest tests/test_skill_schema_injection.py -v
+# 运行特定测试（详细模式）
+uv run pytest tests/test_plan_normalization.py -v
 ```
 
-### 添加新技能
+### 代码统计
 
-1. 在 `blender_provider/vbf_addon/skills_impl/` 创建/编辑技能模块
-2. 实现函数：`def skill_name(**kwargs) -> Dict[str, Any]`
-3. 在 `registry.py` SKILL_REGISTRY 字典中注册
-4. 返回 `{"ok": True, ...}` 或抛出 `fmt_err()`
+```bash
+# 查看代码行数
+wc -l vbf/*.py
 
-示例：
-
-```python
-def create_cube(name: str, size: float = 1.0) -> Dict[str, Any]:
-    try:
-        bpy.ops.mesh.primitive_cube_add(size=size)
-        obj = bpy.context.active_object
-        obj.name = name
-        return {"ok": True, "object_name": obj.name}
-    except Exception as e:
-        raise fmt_err("create_cube 失败", e)
+# 当前 (v2.0):
+# vbf/client.py:          442 行 (原为 963, -54%)
+# vbf/llm_integration.py: 279 行 (新)
+# vbf/plan_normalization.py: 126 行 (新)
+# vbf/scene_state.py:     130 行 (新)
 ```
 
 ---
@@ -352,25 +342,19 @@ def create_cube(name: str, size: float = 1.0) -> Dict[str, Any]:
 ## 故障排除
 
 ### WebSocket 连接失败
+1. 验证 Blender 插件运行中：N 面板 → VBF → 状态 "Running"
+2. 检查 `VBF_WS_HOST` 和 `VBF_WS_PORT` 变量
+3. 确保端口 8006 未被阻塞
 
-1. 验证 Blender 插件运行中：N 面板 → VBF → 状态应显示 "Running"
-2. 检查主机/端口：`VBF_WS_HOST` 和 `VBF_WS_PORT` 环境变量
-3. 确保防火墙未阻止端口 8006
+### LLM 未配置
+- **错误：** "LLM 未配置。状态已保存到 task_state.json"
+- **解决方案：** 设置环境变量或创建 `vbf/config/llm.json`
+- 然后恢复：`--resume vbf/config/task_state.json`
 
-### LLM 无响应
-
-1. 检查 `VBF_LLM_API_KEY` 和 `VBF_LLM_BASE_URL` 已设置
-2. 测试 API 连接：`curl $VBF_LLM_BASE_URL/models -H "Authorization: Bearer $VBF_LLM_API_KEY"`
-3. 如未配置将退回到 RadioTask 演示
-
-### Blender Python 依赖
-
-如果 `websockets` 安装失败：
-```python
-# 在 Blender Python 控制台：
-import sys
-print(sys.executable)  # 记录此路径
-# 使用此 Python 安装：/path/to/blender/python -m pip install websockets
+### 从检查点恢复
+```bash
+# 中断后恢复
+vbf --prompt "继续之前的任务" --resume vbf/config/task_state.json
 ```
 
 ---
@@ -390,5 +374,9 @@ MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
 ## 链接
 
 - **文档**：[API 覆盖分析](docs/API_COVERAGE_ANALYSIS.md)
-- **问题**：[GitHub Issues](https://github.com/yourusername/vibe-blender-flow/issues)
-- **English Version**: [English Documentation](README.md)
+- **议题**：[GitHub Issues](https://github.com/vinci-0007/vibe-blender-flow/issues)
+- **英文版**：[English Documentation](README.md)
+
+---
+
+**为 Blender 社区制造 ❤️**

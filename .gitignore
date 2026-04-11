@@ -33,3 +33,7 @@ docs/覆盖率.md
 find-buddy.bat
 /tests/.hypothesis
 tests/a.py
+CLAUDE.md.bak
+CLAUDE.md
+.claude/settings.local.json
+TASK_STATE.md

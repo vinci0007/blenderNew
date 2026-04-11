@@ -4,9 +4,10 @@
 
 **[中文版](README_CN.md)** | **English**
 
-[![License]TBD](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Stars](https://img.shields.io/github/stars/vinci-0007/vibe-blender-flow)](https://github.com/vinci-0007/vibe-blender-flow/stars)
 
 ## Example: Make a Cellphone
 
@@ -18,44 +19,79 @@
 
 VBF enables natural-language driven 3D modeling in Blender through three core principles:
 
-1. **High-Level Skills**: Blender addon provides 290+ atomic skills (no direct bmesh manipulation)
+1. **High-Level Skills**: Blender addon provides 253 atomic skills (no direct bmesh manipulation)
 2. **JSON-RPC Protocol**: Python client calls skills via WebSocket with automatic error recovery
 3. **LLM Integration**: Schema-aware planning prevents parameter hallucination
 
 ## What's New
 
-**v2.0 - Major Update (2026-04-08):**
+**v2.0 - Major Update (2026-04-11):**
+- **Code Refactoring**: Client module reduced from 963 to 442 lines (-54%)
+- **Four-Layer Control System**: Checkpoint/Resume, Enhanced Recovery, Active Replanning, Real-time Feedback
+- **Complete RadioTask Removal**: No hardcoded demo tasks, pure LLM-driven workflow
+- **Scene State Capture**: Current scene context fed back to LLM for smart replanning
+
+**v1.5 - Smart Recovery (2026-04-08):**
 - **290+ Skills Implemented** across 38 domain modules
-- **Full Blender 4.0/5.x Compatibility** (EEVEE_NEXT support)
-- **38 New Modules**: armature, asset, compositor, drivers, geometry_nodes, grease_pencil, particles, physics, sculpting, sequencer, tracking, and more
-- **Production Ready**: Comprehensive coverage for modeling, UV, materials, animation, camera, lighting, and constraints
+- **Physical Rollback**: `vbf.rollback_to_step()` for undo to specific step
+- **LLM Repair Planning**: Automatically regenerate repair plans on failure
+- **Task Resumption**: `--resume` flag for interrupted tasks
 
 See [API Coverage Analysis](docs/API_COVERAGE_ANALYSIS.md) for detailed coverage metrics.
+
+---
+
+## Project Statistics
+
+```
+Code Evolution:
+Initial    v1.0    v2.0
+│          │       │
+▼          ▼       ▼
+===========================================
+client.py │  ████████████████████ (963 lines)
+          │  ██████████████       (442 lines)  -54% ↓
+          │
+Skills    │  ████████████████████████ (100+)
+          │  ████████████████████████████████████████ (253 skills)  +153% ↑
+          │
+Tests     │  ████ (8)
+          │  ██████████████████████ (38+)  +375% ↑
+```
+
+**Current Stats:**
+- **Client Lines**: 442 (clean, maintainable)
+- **Skills**: 253 across 38 categories
+- **Test Coverage**: 38+ tests
+- **Modules**: 9 core Python modules
 
 ---
 
 ## Repository Structure
 
 ```
-/vbf                      Main Python package (VBFClient, CLI, LLM integration)
-  ├─ cli.py               CLI entry: `vbf --prompt "..."`
-  ├─ client.py            VBFClient class
-  ├─ jsonrpc_ws.py        WebSocket JSON-RPC client
-  ├─ llm_openai_compat.py LLM integration (OpenAI-compatible APIs)
-  └─ vibe_protocol.py     Plan resolver with $ref support
+/vbf                          Main Python package (442 lines)
+├─ cli.py                     CLI entry: `vbf --prompt "..."`
+├─ client.py                  VBFClient class (4-layer system)
+├─ jsonrpc_ws.py              WebSocket JSON-RPC client
+├─ llm_integration.py         LLM integration (new module)
+├─ plan_normalization.py      Plan normalization (new module)
+├─ scene_state.py             Scene capture for feedback (new)
+├─ task_state.py              Checkpoint/Resume state
+├─ llm_openai_compat.py       OpenAI-compatible API support
+└─ vibe_protocol.py           Plan resolver with $ref
 
-/blender_provider         Blender addon source
-  └─ vbf_addon/           Standard Blender addon (install this)
-      ├─ __init__.py      Addon registration
-      ├─ server.py        WebSocket server (JSON-RPC endpoint)
-      └─ skills_impl/     290+ skill implementations
-          ├─ registry.py  SKILL_REGISTRY dict
-          ├─ primitives.py, mesh_ops.py, uv_ops.py
-          ├─ armature.py, particles.py, physics.py
-          └─ [35 more modules...]
+/blender_provider             Blender addon source
+└─ vbf_addon/                 Standard Blender addon
+   ├─ server.py                WebSocket server
+   └─ skills_impl/             253 skill implementations
+      ├─ registry.py            SKILL_REGISTRY
+      └─ [38 domain modules...]
 
-/client                   Legacy client (deprecated)
-/reference                Reference materials
+/tests/                       Test suite
+├─ test_plan_normalization.py Plan normalization tests
+├─ test_llm_integration.py    LLM integration tests
+└─ [other tests...]
 ```
 
 ---
@@ -64,11 +100,11 @@ See [API Coverage Analysis](docs/API_COVERAGE_ANALYSIS.md) for detailed coverage
 
 ### Client Side
 - Python >= 3.10
-- Dependencies: `websockets`
+- Dependencies: `openai>=2.30.0`, `websockets`
 
 ### Blender Side
 - Blender 4.0+ or 5.x
-- Python `websockets` package (installed in Blender's Python):
+- Python `websockets` package:
 
 ```python
 # In Blender Python Console:
@@ -94,8 +130,8 @@ subprocess.run([sys.executable, "-m", "pip", "install", "websockets"])
    - Enable the addon
 
 3. Start the server:
-   - **Method 1**: N-panel → VBF tab → Start button
-   - **Method 2**: Blender Python Console: `bpy.ops.vbf.serve()`
+   - N-panel → VBF tab → Start button
+   - Or: `bpy.ops.vbf.serve()`
 
 ### Client Installation
 
@@ -106,14 +142,14 @@ uv sync
 
 Using pip:
 ```bash
-pip install websockets
+pip install openai>=2.30.0 websockets
 ```
 
 ---
 
 ## LLM Configuration
 
-VBF supports OpenAI-compatible APIs. If not configured, falls back to a deterministic `RadioTask` demo.
+**⚠️ Important:** VBF requires an LLM to function. Configure one of the following:
 
 ### Method A: Environment Variables (Recommended)
 
@@ -123,7 +159,7 @@ export VBF_LLM_API_KEY="your-key"
 export VBF_LLM_MODEL="gpt-4o-mini"
 ```
 
-Optional:
+**Optional:**
 - `VBF_LLM_TEMPERATURE` (default: `0.2`)
 - `VBF_LLM_CHAT_COMPLETIONS_PATH` (default: `/v1/chat/completions`)
 
@@ -140,6 +176,12 @@ Create `vbf/config/llm.json`:
 }
 ```
 
+**Note:** If LLM is not configured, VBF will save a checkpoint and request configuration:
+```
+[VBF] LLM not configured. State saved to: vbf/config/task_state.json
+[VBF] Resume: vbf --prompt "..." --resume "vbf/config/task_state.json"
+```
+
 ---
 
 ## Usage
@@ -147,12 +189,15 @@ Create `vbf/config/llm.json`:
 ### Quick Start
 
 ```bash
-# Method 1: Module invocation (no install needed)
+# Basic usage
 python -m vbf --prompt "create a retro radio"
 
-# Method 2: After installation
+# With resume support
+python -m vbf --prompt "create a retro radio" --resume vbf/config/task_state.json
+
+# After uv installation
 uv sync
-vbf --prompt "create a retro radio"
+vbf --prompt "create a detailed car model"
 ```
 
 ### CLI Options
@@ -161,10 +206,11 @@ vbf --prompt "create a retro radio"
 vbf --prompt "your prompt" \
     --host 127.0.0.1 \
     --port 8006 \
-    --blender-path "C:/Program Files/Blender/blender.exe"
+    --blender-path "C:/Program Files/Blender/blender.exe" \
+    --resume "path/to/task_state.json"
 ```
 
-### As Python Module
+### Python API
 
 ```python
 import asyncio
@@ -173,142 +219,95 @@ from vbf import VBFClient
 async def main():
     client = VBFClient()
     await client.ensure_connected()
-    await client.run_radio_task(prompt="复古收音机")
+    
+    # Run task with automatic error recovery
+    result = await client.run_task("create a detailed spaceship")
+    
+    # Or resume from checkpoint
+    result = await client.run_task(
+        "create a detailed spaceship",
+        resume_state_path="vbf/config/task_state.json"
+    )
 
 asyncio.run(main())
 ```
 
 ---
 
-## Skill Categories (290+ Skills)
+## Four-Layer Control System (New in v2.0)
+
+### Layer 1: Checkpoint/Resume
+**Problem:** Connection failures or LLM interruptions during long-running tasks.
+
+**Solution:** Automatic state saving on any failure.
+
+```python
+# Task automatically saves progress on failure
+try:
+    await client.run_task("complex model")
+except TaskInterruptedError as e:
+    print(f"Interrupted: {e}")
+    print(f"Resume: --resume '{e.state_path}'")
+```
+
+### Layer 2: Enhanced Error Recovery
+**Problem:** Skill execution fails mid-plan.
+
+**Solution:** Physical rollback + LLM-generated repair plan.
+
+```python
+# On step failure:
+# 1. Roll back to pre-failure state
+await client.rollback_to_step("failed_step_id")
+# 2. Generate repair plan with current scene context
+repair_plan = await client.request_repair(...)
+```
+
+### Layer 3: Active Replanning
+**Problem:** Plan wasn't optimal from the start.
+
+**Solution:** Request new plan from any step.
+
+```python
+# Replan from current position
+new_plan, new_steps = await client.request_replan(
+    prompt="make it more detailed",
+    from_step_id="step_5",
+    current_plan=plan,
+    step_results=results
+)
+```
+
+### Layer 4: Real-time Feedback (Optional)
+**Problem:** LLM can't see actual scene state.
+
+**Solution:** Feed scene state back after each step.
+
+```python
+result = await client.run_task(
+    "create a car",
+    enable_step_feedback=True  # Optional per-step LLM analysis
+)
+```
+
+---
+
+## Skill Categories (253 Skills)
 
 | Category | Skills | Coverage |
 |----------|--------|----------|
-| **Scene Management** | scene_clear, delete_object, rename_object, duplicate_object | ✅ Complete |
-| **Primitives** | create_primitive (cube/cylinder/cone/sphere), create_beveled_box, create_nested_cones | ✅ Complete |
-| **Geometry** | extrude_faces, inset_faces, subdivide_mesh, triangulate, bridge_edge_loops | ✅ Complete |
-| **UV Operations** | unwrap_mesh, smart_project_uv, lightmap_pack, pack_uv_islands, mark_seam | ✅ Complete |
+| **Primitives** | create_primitive, create_beveled_box, create_nested_cones | ✅ Complete |
+| **Geometry** | extrude_faces, inset_faces, subdivide_mesh, triangulate | ✅ Complete |
+| **UV** | unwrap_mesh, smart_project_uv, pack_uv_islands, mark_seam | ✅ Complete |
 | **Materials** | create_material_simple, assign_material, create_shader_node_tree | ✅ Complete |
-| **Textures** | import_image_texture, add_texture_to_material, set_texture_mapping | ✅ Complete |
-| **Lighting** | create_light (4 types), set_light_properties, set_render_engine | ✅ Complete |
-| **Camera** | create_camera, set_camera_active, camera_look_at, get_camera_info | ✅ Complete |
-| **Animation** | insert_keyframe, set_frame_range, set_animation_fps, evaluate_fcurve | ✅ Complete |
-| **Collections** | create_collection, link_to_collection, isolate_in_collection | ✅ Complete |
-| **Constraints** | add_constraint_copy_location/rotation/scale, set_parent | ✅ Complete |
-| **Curves/Text** | create_curve_bezier, create_text, set_font, text_to_curve | ✅ Complete |
-| **Armature** | create_armature, add_bone, skin_to_armature, add_bone_constraint | ✅ Complete (NEW) |
-| **Particles** | create_particle_system, set_particle_settings, hair_particles | ✅ Complete (NEW) |
-| **Physics** | add_rigidbody, add_cloth, add_fluid, add_soft_body | ✅ Complete (NEW) |
-| **Geometry Nodes** | create_geometry_node_tree, add_geometry_node, link_geometry_nodes | ✅ Complete (NEW) |
-| **Sculpting** | sculpt_mask, sculpt_draw, sculpt_smooth, dynamic_topology | ✅ Complete (NEW) |
-| **Rendering** | set_render_engine, set_render_resolution, render_frame | ✅ Complete (NEW) |
-| **Compositor** | create_compositor_node_tree, add_compositor_node, link_compositor_nodes | ✅ Complete (NEW) |
+| **Animation** | insert_keyframe, set_frame_range, set_animation_fps | ✅ Complete |
+| **Armature** | create_armature, add_bone, skin_to_armature, constraints | ✅ Complete |
+| **Particles** | create_particle_system, set_particle_settings | ✅ Complete |
+| **Physics** | rigidbody_add, cloth_add, fluid_domain_create | ✅ Complete |
+| **Geometry Nodes** | create_geometry_node_tree, add_geometry_node, link_nodes | ✅ Complete |
+| **Sculpting** | sculpt_draw, sculpt_smooth, dyntopo_enabled | ✅ Complete |
+| **Compositor** | create_compositor_tree, add_compositor_node | ✅ Complete |
 | **Runtime Gateway** | py_get, py_set, py_call, ops_invoke, ops_introspect | ✅ Complete |
-
-See [API Coverage Analysis](docs/API_COVERAGE_ANALYSIS.md) for full details.
-
----
-
-## Modeling Workflow
-
-VBF enforces a 9-stage modeling process:
-
-```
-discover → blockout → boolean → detail → bevel → normal_fix → accessories → material → finalize
-```
-
-### Stage Descriptions
-
-| Stage | Description | Example Skills |
-|-------|-------------|----------------|
-| `discover` | Explore API, search operators | ops_search, ops_list |
-| `blockout` | Basic shape blocking | create_primitive, apply_transform |
-| `boolean` | Boolean operations | boolean_tool, join_objects |
-| `detail` | Add details (buttons, holes) | extrude_faces, inset_faces |
-| `bevel` | Bevel edges | add_modifier_bevel |
-| `normal_fix` | Fix normals | recalculate_normals, shade_smooth |
-| `accessories` | Accessories (wires, screws) | create_curve_bezier |
-| `material` | Apply materials | create_material_simple, assign_material |
-| `finalize` | Final cleanup | rename_object, create_collection |
-
----
-
-## Plan Schema
-
-### Skill Reference System
-
-Skills can reference results from previous steps using `$ref`:
-
-```json
-{
-  "steps": [
-    {
-      "step_id": "s1",
-      "skill": "create_primitive",
-      "args": {"primitive_type": "cube", "name": "main"}
-    },
-    {
-      "step_id": "s2",
-      "skill": "spatial_query",
-      "args": {
-        "object_name": {"$ref": "s1.data.object_name"},
-        "query_type": "top_center"
-      }
-    }
-  ]
-}
-```
-
-### Control Fields
-
-```json
-{
-  "controls": {
-    "max_steps": 80,
-    "allow_low_level_gateway": false,
-    "require_ops_introspect_before_invoke": true
-  },
-  "steps": [...]
-}
-```
-
----
-
-## Architecture
-
-### Communication Flow
-
-```
-VBFClient (Python)
-    ↓ WebSocket (JSON-RPC 2.0)
-VBF WebSocket Server (Blender Addon)
-    ↓
-SKILL_REGISTRY
-    ↓
-bpy.ops / bpy.data (Blender API)
-    ↓
-Return {ok: true, data: {...}}
-```
-
-### Design Principles
-
-1. **No Direct bmesh**: Skills wrap `bpy.ops`, not low-level mesh manipulation
-2. **Atomic Operations**: Each skill does one thing
-3. **Self-Validating**: Skills validate parameters and return structured errors
-4. **Stage System**: Plans follow 9-stage workflow enforcement
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VBF_WS_HOST` | `127.0.0.1` | WebSocket server host |
-| `VBF_WS_PORT` | `8006` | WebSocket server port |
-| `BLENDER_PATH` | `blender` | Blender executable |
-| `VBF_LLM_BASE_URL` | - | LLM API endpoint |
-| `VBF_LLM_API_KEY` | - | LLM API key |
-| `VBF_LLM_MODEL` | `gpt-4o-mini` | LLM model name |
 
 ---
 
@@ -323,28 +322,21 @@ uv sync --group dev
 # Run all tests
 uv run pytest
 
-# Run specific test
-uv run pytest tests/test_skill_schema_injection.py -v
+# Run specific test with verbose
+uv run pytest tests/test_plan_normalization.py -v
 ```
 
-### Adding New Skills
+### Code Statistics
 
-1. Create/edit skill module in `blender_provider/vbf_addon/skills_impl/`
-2. Implement function: `def skill_name(**kwargs) -> Dict[str, Any]`
-3. Register in `registry.py` SKILL_REGISTRY dict
-4. Return `{"ok": True, ...}` or raise `fmt_err()`
+```bash
+# Check lines of code
+wc -l vbf/*.py
 
-Example:
-
-```python
-def create_cube(name: str, size: float = 1.0) -> Dict[str, Any]:
-    try:
-        bpy.ops.mesh.primitive_cube_add(size=size)
-        obj = bpy.context.active_object
-        obj.name = name
-        return {"ok": True, "object_name": obj.name}
-    except Exception as e:
-        raise fmt_err("create_cube failed", e)
+# Current (v2.0):
+# vbf/client.py:          442 lines (was 963, -54%)
+# vbf/llm_integration.py: 279 lines (new)
+# vbf/plan_normalization.py: 126 lines (new)
+# vbf/scene_state.py:     130 lines (new)
 ```
 
 ---
@@ -352,25 +344,19 @@ def create_cube(name: str, size: float = 1.0) -> Dict[str, Any]:
 ## Troubleshooting
 
 ### WebSocket Connection Failed
+1. Verify Blender addon is running: N-panel → VBF → Status "Running"
+2. Check `VBF_WS_HOST` and `VBF_WS_PORT` variables
+3. Ensure port 8006 is not blocked
 
-1. Verify Blender addon is running: N-panel → VBF → Status should show "Running"
-2. Check host/port: `VBF_WS_HOST` and `VBF_WS_PORT` environment variables
-3. Ensure no firewall blocking port 8006
+### LLM Not Configured
+- **Error:** "LLM not configured. State saved to task_state.json"
+- **Solution:** Set environment variables or create `vbf/config/llm.json`
+- Then resume: `--resume vbf/config/task_state.json`
 
-### LLM Not Responding
-
-1. Check `VBF_LLM_API_KEY` and `VBF_LLM_BASE_URL` are set
-2. Test API connection: `curl $VBF_LLM_BASE_URL/models -H "Authorization: Bearer $VBF_LLM_API_KEY"`
-3. Falls back to RadioTask demo if not configured
-
-### Blender Python Dependencies
-
-If `websockets` install fails:
-```python
-# In Blender Python Console:
-import sys
-print(sys.executable)  # Note this path
-# Use this Python to install: /path/to/blender/python -m pip install websockets
+### Resume from Checkpoint
+```bash
+# After interruption
+vbf --prompt "continue previous task" --resume vbf/config/task_state.json
 ```
 
 ---
@@ -390,5 +376,9 @@ MIT License - see [LICENSE](LICENSE) file.
 ## Links
 
 - **Documentation**: [API Coverage Analysis](docs/API_COVERAGE_ANALYSIS.md)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/vibe-blender-flow/issues)
+- **Issues**: [GitHub Issues](https://github.com/vinci-0007/vibe-blender-flow/issues)
 - **Chinese Version**: [中文文档](README_CN.md)
+
+---
+
+**Made with ❤️ for the Blender community**
