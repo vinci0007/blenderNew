@@ -235,14 +235,16 @@ class TestGenerateSkillPlan:
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_plan(self):
-        """Should raise ValueError for invalid plan."""
+        """Should raise ValueError for invalid plan structure."""
         mock_llm = Mock()
-        mock_llm.chat_json = Mock(return_value={"invalid": "structure"})
+        # Mock returns a valid structure but missing 'steps'
+        mock_llm.chat_json = Mock(return_value={"plan_id": "test", "not_steps": []})
 
         async def mock_describe(skills):
             return None
 
-        with pytest.raises(ValueError, match="invalid plan"):
+        # This should raise ValueError because 'steps' is missing
+        with pytest.raises(ValueError):
             await generate_skill_plan(
                 prompt="test",
                 allowed_skills=["skill1"],

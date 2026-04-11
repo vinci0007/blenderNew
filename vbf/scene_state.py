@@ -97,8 +97,23 @@ class SceneState:
             return [obj for obj in self._objects.values() if obj.get("_modified")]
         return list(self._objects.values())
 
+    @property
+    def warnings(self) -> List[str]:
+        """Public access to warnings."""
+        return self._warnings
+
+    @property
+    def errors(self) -> List[str]:
+        """Public access to errors."""
+        return self._errors
+
+    @property
+    def statistics(self) -> Dict[str, Any]:
+        """Public access to statistics."""
+        return self._statistics
+
     def to_dict(self, incremental: bool = False,
-               since_step_id: Optional[str] = None) -> Dict[str, Any]:
+                since_step_id: Optional[str] = None) -> Dict[str, Any]:
         """Convert to dictionary.
 
         Args:
@@ -124,7 +139,7 @@ class SceneState:
         }
 
     def to_prompt_text(self, incremental: bool = False,
-                      since_step_id: Optional[str] = None) -> str:
+                       since_step_id: Optional[str] = None) -> str:
         """Convert to text for LLM prompts.
 
         Args:
