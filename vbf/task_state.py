@@ -7,7 +7,15 @@ from typing import Any, Dict, List, Optional
 
 
 class TaskState:
-    """Snapshot of a modeling task at a given step index, for resume support."""
+    """Snapshot of a modeling task at a given step index, for resume support.
+
+    Memory-optimized with __slots__ to reduce per-instance memory overhead.
+    """
+
+    __slots__ = [
+        'prompt', 'plan', 'steps', 'step_results',
+        'current_step_index', 'allowed_skills', 'skill_schemas', 'saved_at'
+    ]
 
     def __init__(
         self,

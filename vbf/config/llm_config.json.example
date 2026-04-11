@@ -7,5 +7,14 @@
   "chat_completions_path": "/v1/chat/completions",
   "use_response_format_json_object": true,
   "allow_low_level_gateway": false,
-  "auto_allow_low_level_gateway": true
+  "auto_allow_low_level_gateway": true,
+  "llm_api_throttling": {
+    "max_concurrent_calls": 3,
+    "max_calls_per_minute": 20,
+    "call_timeout_seconds": 60,
+    "retry_on_failure": {
+      "max_attempts": 3,
+      "delay_between_attempts_seconds": 1.0
+    }
+  }
 }

@@ -41,18 +41,48 @@ def is_llm_enabled() -> bool:
     return bool(cfg.use_llm)
 
 
-async def call_llm_json(llm: OpenAICompatLLM, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    """Call LLM and parse JSON response.
+async def call_llm_json(
+    llm: OpenAICompatLLM,
+    messages: List[Dict[str, str]],
+    use_throttle: bool = True,
+    use_cache: bool = True
+) -> Dict[str, Any]:
+    """Call LLM with caching and optional throttling.
 
     Args:
         llm: The LLM instance
         messages: Chat messages for the LLM
+        use_throttle: Whether to apply rate limiting (default: True)
+        use_cache: Whether to use response caching (default: True)
 
     Returns:
         Parsed JSON response as dict
     """
-    # urllib-based implementation is blocking; run in a thread
-    return await asyncio.to_thread(llm.chat_json, messages)
+    from .llm_cache import get_cache
+    from .llm_rate_limiter import call_llm_with_throttle
+
+    cache = get_cache() if use_cache else None
+
+    # Try cache first
+    if cache:
+        cached = cache.get(messages)
+        if cached is not None:
+            return cached
+
+    # Miss: call LLM (with optional throttling)
+    async def _call_impl():
+        return await asyncio.to_thread(llm.chat_json, messages)
+
+    if use_throttle:
+        response = await call_llm_with_throttle(_call_impl)
+    else:
+        response = await _call_impl()
+
+    # Cache the response
+    if cache:
+        cache.set(messages, response)
+
+    return response
 
 
 def _json_dumps(obj: Any) -> str:

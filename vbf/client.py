@@ -30,6 +30,8 @@ from .plan_normalization import normalize_plan
 from .vibe_protocol import resolve_refs, merge_step_results_for_prompt
 from .task_state import TaskState, TaskInterruptedError
 from .scene_state import SceneState, FeedbackContext
+from .memory_manager import MemoryManager, MemoryStats
+from .progress import ProgressVisualizer, DisplayMode
 
 
 class VBFClient:
@@ -41,6 +43,7 @@ class VBFClient:
         port: Optional[int] = None,
         blender_path: Optional[str] = None,
         start_script_path: Optional[str] = None,
+        memory_limit_mb: Optional[int] = None,  # Memory optimization
     ):
         self.host = host or os.getenv("VBF_WS_HOST", "127.0.0.1")
         self.port = int(port) if port is not None else int(os.getenv("VBF_WS_PORT", "8006"))
@@ -54,6 +57,14 @@ class VBFClient:
         self._ws = JsonRpcWebSocketClient(f"ws://{self.host}:{self.port}")
         self._default_save_path = os.path.join(
             os.path.dirname(__file__), "config", "task_state.json"
+        )
+
+        # Initialize memory manager
+        memory_threshold = memory_limit_mb or int(os.getenv("VBF_MEMORY_THRESHOLD_MB", "512"))
+        self._memory_manager = MemoryManager(
+            memory_threshold_mb=memory_threshold,
+            step_results_limit=int(os.getenv("VBF_STEP_RESULTS_LIMIT", "100")),
+            auto_cleanup=True,
         )
 
     async def ensure_connected(self, timeout_s: float = 30.0) -> None:
@@ -274,7 +285,8 @@ class VBFClient:
 
     async def run_task(self, prompt: str, resume_state_path: Optional[str] = None,
                       save_state_path: Optional[str] = None,
-                      enable_step_feedback: bool = False) -> Dict[str, Any]:
+                      enable_step_feedback: bool = False,
+                      display_mode: str = "console") -> Dict[str, Any]:
         """Execute modeling task with full checkpoint/replan/recovery support."""
         await self.ensure_connected()
 
