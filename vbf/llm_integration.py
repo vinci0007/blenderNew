@@ -118,7 +118,7 @@ def build_skill_plan_messages(
         "steps": [
             {
                 "step_id": "string",
-                "stage": "discover|blockout|boolean|detail|bevel|normal_fix|accessories|material|finalize",
+                "stage": "reference_analysis|mood_board|style_definition|primitive_blocking|silhouette_validation|proportion_check|topology_prep|edge_flow|boolean_operations|bevel_chamfer|micro_detailing|high_poly_finalize|normal_baking|uv_prep|material_prep|material_assignment|lighting_check|finalize",
                 "skill": "string",
                 "args": {"any": "json-serializable"},
                 "on_success": {
@@ -168,7 +168,7 @@ def build_skill_plan_messages(
             'If the stored value is not an object/dict, reference it as {"$ref":"<alias_name>.data.value"}.',
             "Prefer coordinate alignment by using move_object_anchor_to_point rather than doing arithmetic in $ref.",
             "For unknown operators, first use ops_search; then use ops_introspect on candidate operator_id; then call ops_invoke.",
-            "Stage order must be monotonic: discover -> blockout -> boolean -> detail -> bevel -> normal_fix -> accessories -> material -> finalize.",
+            "Stage order must be monotonic: reference_analysis -> mood_board -> style_definition -> primitive_blocking -> silhouette_validation -> proportion_check -> topology_prep -> edge_flow -> boolean_operations -> bevel_chamfer -> micro_detailing -> high_poly_finalize -> normal_baking -> uv_prep -> material_prep -> material_assignment -> lighting_check -> finalize.",
         ],
     }
 

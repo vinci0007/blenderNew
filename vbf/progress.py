@@ -44,11 +44,15 @@ class TaskProgress:
     total_steps: int = 0
     completed_steps: int = 0
     failed_steps: int = 0
-    current_stage: str = "discover"
+    current_stage: str = "reference_analysis"
     steps: Dict[str, ProgressStep] = field(default_factory=dict)
     stage_order: List[str] = field(default_factory=lambda: [
-        "discover", "blockout", "boolean", "detail", "bevel",
-        "normal_fix", "accessories", "material", "finalize"
+        "reference_analysis", "mood_board", "style_definition",
+        "primitive_blocking", "silhouette_validation", "proportion_check",
+        "topology_prep", "edge_flow", "boolean_operations",
+        "bevel_chamfer", "micro_detailing", "high_poly_finalize",
+        "normal_baking", "uv_prep", "material_prep",
+        "material_assignment", "lighting_check", "finalize"
     ])
     start_time: Optional[float] = None
     end_time: Optional[float] = None

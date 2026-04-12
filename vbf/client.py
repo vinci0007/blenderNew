@@ -325,7 +325,20 @@ class VBFClient:
             start_index = saved.current_step_index
             print(f"[VBF] Resuming at step {start_index}/{len(steps)}")
         else:
-            plan, steps = await self._plan_skill_task(prompt, allowed_skills, _save_path)
+            # Apply style template
+            if style:
+                style_manager = get_style_manager()
+                if style_manager.style_exists(style):
+                    styled_prompt = style_manager.apply_style_to_prompt(style, prompt)
+                    print(f"[VBF] Using style: {style}")
+                else:
+                    available = ", ".join(style_manager.list_styles()[:5])
+                    print(f"[VBF] Warning: Unknown style '{style}'. Available: {available}...")
+                    styled_prompt = prompt
+            else:
+                styled_prompt = prompt
+            
+            plan, steps = await self._plan_skill_task(styled_prompt, allowed_skills, _save_path)
             step_results = {}
             start_index = 0
             print(f"[VBF] Generated plan with {len(steps)} steps")

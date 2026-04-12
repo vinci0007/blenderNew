@@ -1,62 +1,60 @@
 """
-Bug condition exploration test for VBF stage system.
+Tests for VBF professional 18-stage modeling workflow.
 
-Task 1: Verify the bug exists — the current (unfixed) stage_order dict
-is missing the 4 new stage names: boolean, bevel, normal_fix, accessories.
-
-This test is EXPECTED TO FAIL on unfixed code.
-Failure confirms the bug exists (the 4 assertions all pass, meaning the
-keys are absent from stage_order, which is the bug condition).
-
-Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.6
+Stage order:
+Phase 1: reference_analysis -> mood_board -> style_definition
+Phase 2: primitive_blocking -> silhouette_validation -> proportion_check
+Phase 3: topology_prep -> edge_flow -> boolean_operations
+Phase 4: bevel_chamfer -> micro_detailing -> high_poly_finalize
+Phase 5: normal_baking -> uv_prep -> material_prep
+Phase 6: material_assignment -> lighting_check -> finalize
 """
 
-# Directly construct the CURRENT (unfixed) stage_order from vbf/client.py
-stage_order = {"discover": 0, "blockout": 1, "detail": 2, "material": 3, "finalize": 4}
+from typing import Dict, List
+
+# The PROFESSIONAL stage_order (18 stages)
+stage_order = {
+    # Phase 1: Concept & Analysis
+    "reference_analysis": 0,
+    "mood_board": 1,
+    "style_definition": 2,
+    # Phase 2: Blocking
+    "primitive_blocking": 3,
+    "silhouette_validation": 4,
+    "proportion_check": 5,
+    # Phase 3: Structure
+    "topology_prep": 6,
+    "edge_flow": 7,
+    "boolean_operations": 8,
+    # Phase 4: Detail
+    "bevel_chamfer": 9,
+    "micro_detailing": 10,
+    "high_poly_finalize": 11,
+    # Phase 5: Polish
+    "normal_baking": 12,
+    "uv_prep": 13,
+    "material_prep": 14,
+    # Phase 6: Finish
+    "material_assignment": 15,
+    "lighting_check": 16,
+    "finalize": 17,
+}
+
+# Phase groupings
+PHASE_1_STAGES = ["reference_analysis", "mood_board", "style_definition"]
+PHASE_2_STAGES = ["primitive_blocking", "silhouette_validation", "proportion_check"]
+PHASE_3_STAGES = ["topology_prep", "edge_flow", "boolean_operations"]
+PHASE_4_STAGES = ["bevel_chamfer", "micro_detailing", "high_poly_finalize"]
+PHASE_5_STAGES = ["normal_baking", "uv_prep", "material_prep"]
+PHASE_6_STAGES = ["material_assignment", "lighting_check", "finalize"]
+ALL_PHASES = PHASE_1_STAGES + PHASE_2_STAGES + PHASE_3_STAGES + PHASE_4_STAGES + PHASE_5_STAGES + PHASE_6_STAGES
 
 
-def test_boolean_stage_missing_from_stage_order():
-    """Bug condition: 'boolean' stage is absent — Controller would reject it."""
-    assert "boolean" not in stage_order
-
-
-def test_bevel_stage_missing_from_stage_order():
-    """Bug condition: 'bevel' stage is absent — Controller would reject it."""
-    assert "bevel" not in stage_order
-
-
-def test_normal_fix_stage_missing_from_stage_order():
-    """Bug condition: 'normal_fix' stage is absent — Controller would reject it."""
-    assert "normal_fix" not in stage_order
-
-
-def test_accessories_stage_missing_from_stage_order():
-    """Bug condition: 'accessories' stage is absent — Controller would reject it."""
-    assert "accessories" not in stage_order
-
-
-# ---------------------------------------------------------------------------
-# Task 2: Preservation property tests (run on UNFIXED code)
-#
-# These tests MUST PASS on unfixed code — they establish the baseline
-# behaviour that the fix must not break.
-#
-# Validates: Requirements 3.1, 3.2, 3.3, 3.5
-# ---------------------------------------------------------------------------
-
-from hypothesis import given, assume, settings
-from hypothesis import strategies as st
-
-# The unfixed stage_order (same dict defined at module level above)
-_ORIGINAL_STAGES = ["discover", "blockout", "detail", "material", "finalize"]
-_ORIGINAL_RANKS = {"discover": 0, "blockout": 1, "detail": 2, "material": 3, "finalize": 4}
-
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Helper: replicate the validation logic from vbf/client.py run_task
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-def _validate_stage_sequence(sequence, order_dict):
+def _validate_stage_sequence(sequence: List[str], order_dict: Dict[str, int]) -> None:
     """
     Simulate the stage monotonicity check from run_task.
     Raises ValueError if any stage is unknown or goes backwards.
@@ -73,179 +71,180 @@ def _validate_stage_sequence(sequence, order_dict):
         current_stage_rank = order_dict[stage]
 
 
-# ---------------------------------------------------------------------------
-# 1. Original 5 stage names are present with correct relative order
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 1. Basic presence tests - All 18 stages exist
+# -----------------------------------------------------------------------------
 
-def test_original_stages_present_in_stage_order():
-    """All 5 original stage names exist in stage_order."""
-    for name in _ORIGINAL_STAGES:
+def test_all_phases_present_in_stage_order():
+    """All 18 professional stage names exist in stage_order."""
+    for name in ALL_PHASES:
         assert name in stage_order, f"'{name}' missing from stage_order"
 
 
-def test_original_stages_relative_order():
-    """discover < blockout < detail < material < finalize in stage_order."""
-    assert stage_order["discover"] < stage_order["blockout"]
-    assert stage_order["blockout"] < stage_order["detail"]
-    assert stage_order["detail"] < stage_order["material"]
-    assert stage_order["material"] < stage_order["finalize"]
+def test_phase_1_stages_present():
+    """Phase 1 (Concept) stages exist."""
+    for stage in PHASE_1_STAGES:
+        assert stage in stage_order, f"Phase 1 stage '{stage}' missing"
 
 
-# ---------------------------------------------------------------------------
-# 2. Hypothesis: monotonically non-decreasing sequences pass validation
-# ---------------------------------------------------------------------------
-
-# Use a proper generator: pick a non-decreasing sequence of ranks then map to names
-_RANK_TO_STAGE = {v: k for k, v in _ORIGINAL_RANKS.items()}
-_RANKS = sorted(_ORIGINAL_RANKS.values())  # [0, 1, 2, 3, 4]
+def test_phase_2_stages_present():
+    """Phase 2 (Blocking) stages exist."""
+    for stage in PHASE_2_STAGES:
+        assert stage in stage_order, f"Phase 2 stage '{stage}' missing"
 
 
-@settings(max_examples=200)
-@given(
-    st.lists(
-        st.sampled_from(_RANKS),
-        min_size=1,
-        max_size=12,
-    ).filter(lambda seq: seq == sorted(seq))  # keep only non-decreasing
-)
-def test_monotonic_rank_sequence_passes_validation(rank_seq):
-    """
-    Any monotonically non-decreasing sequence of original stage ranks
-    must pass the validation logic without raising.
-
-    Validates: Requirements 3.1, 3.2
-    """
-    stage_seq = [_RANK_TO_STAGE[r] for r in rank_seq]
-    # Should not raise
-    _validate_stage_sequence(stage_seq, stage_order)
+def test_phase_3_stages_present():
+    """Phase 3 (Structure) stages exist."""
+    for stage in PHASE_3_STAGES:
+        assert stage in stage_order, f"Phase 3 stage '{stage}' missing"
 
 
-# ---------------------------------------------------------------------------
-# 3. Hypothesis: sequences with at least one backwards step raise ValueError
-# ---------------------------------------------------------------------------
+def test_phase_4_stages_present():
+    """Phase 4 (Detail) stages exist."""
+    for stage in PHASE_4_STAGES:
+        assert stage in stage_order, f"Phase 4 stage '{stage}' missing"
 
-@settings(max_examples=200)
-@given(
-    st.lists(st.sampled_from(_RANKS), min_size=2, max_size=12).filter(
-        lambda seq: any(seq[i] > seq[i + 1] for i in range(len(seq) - 1))
-    )
-)
-def test_backwards_step_raises_value_error(rank_seq):
-    """
-    Any sequence that contains at least one backwards step (rank decreases)
-    must raise ValueError.
 
-    Validates: Requirements 3.3
-    """
-    stage_seq = [_RANK_TO_STAGE[r] for r in rank_seq]
+def test_phase_5_stages_present():
+    """Phase 5 (Polish) stages exist."""
+    for stage in PHASE_5_STAGES:
+        assert stage in stage_order, f"Phase 5 stage '{stage}' missing"
+
+
+def test_phase_6_stages_present():
+    """Phase 6 (Finish) stages exist."""
+    for stage in PHASE_6_STAGES:
+        assert stage in stage_order, f"Phase 6 stage '{stage}' missing"
+
+
+# -----------------------------------------------------------------------------
+# 2. Phase ordering tests
+# -----------------------------------------------------------------------------
+
+def test_phase_order_monotonic():
+    """All phases in correct monotonic order."""
+    assert stage_order["reference_analysis"] < stage_order["mood_board"] < stage_order["style_definition"]
+    assert stage_order["style_definition"] < stage_order["primitive_blocking"]
+    assert stage_order["proportion_check"] < stage_order["topology_prep"]
+    assert stage_order["boolean_operations"] < stage_order["bevel_chamfer"]
+    assert stage_order["high_poly_finalize"] < stage_order["normal_baking"]
+    assert stage_order["material_prep"] < stage_order["material_assignment"]
+    assert stage_order["lighting_check"] < stage_order["finalize"]
+
+
+def test_bevel_before_detail():
+    """Bevel stage (9) comes before micro_detailing (10) - professional best practice."""
+    assert stage_order["bevel_chamfer"] < stage_order["micro_detailing"]
+
+
+def test_structure_before_detail():
+    """Structure phase (6-8) before Detail phase (9-11)."""
+    assert stage_order["boolean_operations"] < stage_order["bevel_chamfer"]
+
+
+# -----------------------------------------------------------------------------
+# 3. Stage sequence validation tests
+# -----------------------------------------------------------------------------
+
+def test_monotonic_sequence_passes_validation():
+    """A monotonically increasing sequence should pass validation."""
+    seq = ["reference_analysis", "primitive_blocking", "bevel_chamfer", "material_assignment"]
+    _validate_stage_sequence(seq, stage_order)  # Should not raise
+
+
+def test_stage_stays_same_allowed():
+    """Staying in same stage is allowed (monotonic non-decreasing)."""
+    seq = ["bevel_chamfer", "bevel_chamfer", "bevel_chamfer"]
+    _validate_stage_sequence(seq, stage_order)  # Should not raise
+
+
+def test_backwards_stage_raises_error():
+    """Going backwards should raise ValueError."""
+    seq = ["bevel_chamfer", "primitive_blocking"]  # 9 -> 3 is backwards
     try:
-        _validate_stage_sequence(stage_seq, stage_order)
-        raise AssertionError(
-            f"Expected ValueError for backwards sequence {stage_seq}, but none was raised"
-        )
-    except ValueError:
-        pass  # expected
+        _validate_stage_sequence(seq, stage_order)
+        raise AssertionError("Expected ValueError for backwards sequence")
+    except ValueError as e:
+        assert "goes backwards" in str(e)
 
 
-# ---------------------------------------------------------------------------
-# 4. Same stage appearing consecutively is allowed (monotonicity ≠ strict)
-# ---------------------------------------------------------------------------
-
-def test_same_stage_consecutive_is_allowed():
-    """
-    Repeating the same stage in consecutive steps must NOT raise ValueError.
-    Monotonicity only forbids going backwards, not staying at the same rank.
-
-    Validates: Requirements 3.5
-    """
-    for stage_name in _ORIGINAL_STAGES:
-        # Two consecutive identical stages
-        _validate_stage_sequence([stage_name, stage_name], stage_order)
-        # Three in a row
-        _validate_stage_sequence([stage_name, stage_name, stage_name], stage_order)
+def test_invalid_stage_raises_error():
+    """Invalid stage name should raise ValueError."""
+    seq = ["reference_analysis", "invalid_stage_name"]
+    try:
+        _validate_stage_sequence(seq, stage_order)
+        raise AssertionError("Expected ValueError for invalid stage")
+    except ValueError as e:
+        assert "Invalid stage" in str(e)
 
 
-@settings(max_examples=100)
-@given(
-    st.sampled_from(_ORIGINAL_STAGES),
-    st.integers(min_value=2, max_value=8),
-)
-def test_repeated_stage_always_allowed(stage_name, repeat_count):
-    """
-    Repeating any original stage N times consecutively must always pass.
+# -----------------------------------------------------------------------------
+# 4. Professional workflow tests
+# -----------------------------------------------------------------------------
 
-    Validates: Requirements 3.5
-    """
-    _validate_stage_sequence([stage_name] * repeat_count, stage_order)
-
-
-# ---------------------------------------------------------------------------
-# Task 3.6: Post-fix verification tests
-#
-# These tests verify the fix is in place — the 4 new stage names ARE now
-# present in the fixed stage_order from vbf/client.py.
-#
-# The fixed stage_order is:
-#   {"discover": 0, "blockout": 1, "boolean": 2, "detail": 3, "bevel": 4,
-#    "normal_fix": 5, "accessories": 6, "material": 7, "finalize": 8}
-#
-# Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.6
-# ---------------------------------------------------------------------------
-
-# The FIXED stage_order from vbf/client.py (post-fix)
-_FIXED_STAGE_ORDER = {
-    "discover": 0,
-    "blockout": 1,
-    "boolean": 2,
-    "detail": 3,
-    "bevel": 4,
-    "normal_fix": 5,
-    "accessories": 6,
-    "material": 7,
-    "finalize": 8,
-}
-
-
-def test_fixed_boolean_stage_present():
-    """Post-fix: 'boolean' stage is now in stage_order — Controller accepts it."""
-    assert "boolean" in _FIXED_STAGE_ORDER
-    assert _FIXED_STAGE_ORDER["boolean"] == 2
-
-
-def test_fixed_bevel_stage_present():
-    """Post-fix: 'bevel' stage is now in stage_order — Controller accepts it."""
-    assert "bevel" in _FIXED_STAGE_ORDER
-    assert _FIXED_STAGE_ORDER["bevel"] == 4
-
-
-def test_fixed_normal_fix_stage_present():
-    """Post-fix: 'normal_fix' stage is now in stage_order — Controller accepts it."""
-    assert "normal_fix" in _FIXED_STAGE_ORDER
-    assert _FIXED_STAGE_ORDER["normal_fix"] == 5
-
-
-def test_fixed_accessories_stage_present():
-    """Post-fix: 'accessories' stage is now in stage_order — Controller accepts it."""
-    assert "accessories" in _FIXED_STAGE_ORDER
-    assert _FIXED_STAGE_ORDER["accessories"] == 6
-
-
-def test_fixed_stage_order_has_all_9_stages():
-    """Post-fix: stage_order contains all 9 stages."""
-    expected = {"discover", "blockout", "boolean", "detail", "bevel", "normal_fix", "accessories", "material", "finalize"}
-    assert set(_FIXED_STAGE_ORDER.keys()) == expected
-
-
-def test_fixed_new_stages_pass_validation():
-    """Post-fix: all 4 new stage names pass the validation logic without raising."""
-    for stage_name in ("boolean", "bevel", "normal_fix", "accessories"):
-        _validate_stage_sequence([stage_name], _FIXED_STAGE_ORDER)
-
-
-def test_fixed_full_9_stage_sequence_passes():
-    """Post-fix: a complete monotonic sequence through all 9 stages passes validation."""
-    full_sequence = [
-        "discover", "blockout", "boolean", "detail",
-        "bevel", "normal_fix", "accessories", "material", "finalize",
+def test_typical_hard_surface_workflow():
+    """Typical hard surface modeling workflow passes validation."""
+    workflow = [
+        "reference_analysis",
+        "primitive_blocking",
+        "silhouette_validation",
+        "proportion_check",
+        "topology_prep",
+        "boolean_operations",
+        "bevel_chamfer",
+        "micro_detailing",
+        "normal_baking",
+        "material_assignment",
+        "finalize",
     ]
-    _validate_stage_sequence(full_sequence, _FIXED_STAGE_ORDER)
+    _validate_stage_sequence(workflow, stage_order)
+
+
+def test_character_workflow():
+    """Character modeling workflow with blocking -> sculpt -> topology."""
+    workflow = [
+        "reference_analysis",
+        "mood_board",
+        "style_definition",  # Define style early
+        "primitive_blocking",
+        "silhouette_validation",  # Check silhouette
+        "proportion_check",
+        "bevel_chamfer",  # Edge softness for organic
+        "micro_detailing",  # Fine details
+        "high_poly_finalize",
+        "material_assignment",
+        "lighting_check",  # Preview with lighting
+        "finalize",
+    ]
+    _validate_stage_sequence(workflow, stage_order)
+
+
+# -----------------------------------------------------------------------------
+# 5. Legacy compatibility note
+# -----------------------------------------------------------------------------
+
+def test_old_stages_removed():
+    """Old non-standard stage names are no longer in stage_order."""
+    old_stages = ["discover", "blockout", "detail", "bevel", "normal_fix", "accessories", "material"]
+    for stage in old_stages:
+        assert stage not in stage_order, f"Old stage '{stage}' should be removed"
+
+
+# -----------------------------------------------------------------------------
+# 6. Phase transition guards
+# -----------------------------------------------------------------------------
+
+def test_no_skipping_early_phases():
+    """Cannot skip early phases - backward movement detected."""
+    seq = ["primitive_blocking", "reference_analysis"]  # 3 -> 0 is backwards
+    try:
+        _validate_stage_sequence(seq, stage_order)
+        raise AssertionError("Should detect backwards movement")
+    except ValueError:
+        pass  # Expected
+
+
+def test_can_stay_in_phase():
+    """Can execute multiple steps within same phase."""
+    seq = ["primitive_blocking", "silhouette_validation", "proportion_check"]
+    _validate_stage_sequence(seq, stage_order)  # All in phase 2

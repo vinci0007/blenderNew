@@ -1,0 +1,35 @@
+{
+  "_comment": "Custom style templates can be added here. Built-in templates are in vbf/style_templates.py",
+  "cyberpunk_gonzo": {
+    "display_name": "Cyberpunk Gonzo",
+    "category": "stylized",
+    "description": "High-tech cyberpunk with exaggerated proportions and neon details",
+    "bevel": {
+      "amount": 0.05,
+      "segments": 2,
+      "profile": 0.3
+    },
+    "topology": {
+      "type": "quad_preferred",
+      "target_face_count": 3000,
+      "auto_cleanup": true
+    },
+    "subdivision": {
+      "type": "catmull_clark",
+      "levels": 2,
+      "use_limit_surface": false
+    },
+    "material": {
+      "type": "pbr_metallic_roughness",
+      "uv_scale": 2.0,
+      "auto_uv_unwrap": true
+    },
+    "preferred_skills": [
+      "bevel_edges",
+      "inset_faces",
+      "extrude_faces",
+      "add_emissive_material"
+    ],
+    "llm_prompt_prefix": "Create a cyberpunk style model with sharp angles, exposed wiring, and glowing elements. "
+  }
+}

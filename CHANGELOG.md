@@ -11,11 +11,31 @@
 ### 新增 (Added)
 
 #### 核心功能
+- **18 阶段专业建模流程** - 重构 9 阶段为行业标准 18 阶段
+  - Phase 1 (概念): reference_analysis → mood_board → style_definition
+  - Phase 2 (粗模): primitive_blocking → silhouette_validation → proportion_check
+  - Phase 3 (结构): topology_prep → edge_flow → boolean_operations
+  - Phase 4 (细节): bevel_chamfer → micro_detailing → high_poly_finalize
+  - Phase 5 (打磨): normal_baking → uv_prep → material_prep
+  - Phase 6 (完成): material_assignment → lighting_check → finalize
+
+- **用户反馈循环系统** (`feedback_loop.py`、`feedback_ui.py`)
+  - 4 个关键检查点用户确认机制
+  - 支持决策：继续/调整/重做/暂停任务
+  - 可保存状态并恢复执行
+  - 21 个专用测试覆盖
+
+- **风格模板系统** (`style_templates.py`)
+  - 预置 4 种建模风格：写实硬表面、低多边形、有机角色、工业道具
+  - CLI 支持 `--style` 参数快速切换
+  - 支持 `--list-styles` 查看可用风格
+  - 用户可通过 JSON 配置自定义风格
+  - 26 个专用测试覆盖
+
 - **进度可视化系统** - 新增实时建模进度显示
   - 支持四种显示模式：console、rich、json、quiet
   - 实时进度条、阶段显示、时间估算
   - LLM 调用次数和内存使用监控
-  - 九个建模阶段（discover → finalize）可视化追踪
   
 #### Phase 2 性能优化模块
 - **内存管理器** (`memory_manager.py`)
@@ -160,7 +180,13 @@
   - Blender 插件端（290+ 技能）
   - Python 客户端（WebSocket JSON-RPC）
   - LLM 集成（Schema 感知计划生成）
-- **9 阶段建模流程**：discover → blockout → boolean → detail → bevel → normal_fix → accessories → material → finalize
+- **18 阶段专业建模流程** (v2.0)
+  - Phase 1 (概念): reference_analysis → mood_board → style_definition
+  - Phase 2 (粗模): primitive_blocking → silhouette_validation → proportion_check
+  - Phase 3 (结构): topology_prep → edge_flow → boolean_operations
+  - Phase 4 (细节): bevel_chamfer → micro_detailing → high_poly_finalize
+  - Phase 5 (打磨): normal_baking → uv_prep → material_prep
+  - Phase 6 (完成): material_assignment → lighting_check → finalize
 - **$ref 机制**：步骤间结果引用和传递
 - **网关技能**：`py_get/py_set/py_call`、`ops_invoke/ops_introspect`
 
