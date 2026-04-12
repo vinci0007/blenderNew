@@ -56,6 +56,37 @@ from .constraints import (
     remove_constraint,
     set_parent,
 )
+from .animation_enhanced import (
+    bake_animation,
+    copy_keyframes,
+    create_action,
+    delete_action,
+    insert_keyframe_bone,
+    insert_keyframe_shape_key,
+    list_actions,
+    nla_add_strip,
+    paste_keyframes,
+    set_action,
+    set_keyframe_handle_type,
+    set_nla_strip_properties,
+)
+from .edge_control import (
+    bisect_mesh,
+    clear_edge_bevel_weight,
+    clear_edge_crease,
+    fill_holes,
+    get_edge_data,
+    mark_edge_crease,
+    select_edge_rings,
+    set_edge_bevel_weight,
+    symmetrize_mesh,
+)
+from .materials_enhanced import (
+    attach_texture_to_material,
+    create_material_pbr,
+    create_material_preset,
+    set_material_ior,
+)
 from .curves import (
     array_along_curve,
     create_curve_bezier,
@@ -91,7 +122,23 @@ from .lighting import (
     set_render_resolution,
 )
 from .materials import assign_material, create_material_simple
-from .modifiers import add_modifier_bevel, add_modifier_subdivision, apply_modifier
+from .modifiers import (
+    add_modifier_bevel,
+    add_modifier_subdivision,
+    apply_modifier,
+)
+from .modifiers_extended import (
+    add_modifier_array,
+    add_modifier_boolean,
+    add_modifier_curve,
+    add_modifier_displace,
+    add_modifier_mirror,
+    add_modifier_shrinkwrap,
+    add_modifier_solidify,
+    configure_modifier,
+    list_modifiers,
+    move_modifier,
+)
 from .node_system import (
     add_node_to_group,
     add_shader_node,
@@ -493,6 +540,49 @@ SKILL_REGISTRY: Dict[str, Callable] = {
     "set_keyframe_interpolation": set_keyframe_interpolation,
     "evaluate_fcurve": evaluate_fcurve,
 
+    # === YOUTUBE ENHANCEMENT: Animation Enhanced ===
+    "insert_keyframe_bone": insert_keyframe_bone,
+    "insert_keyframe_shape_key": insert_keyframe_shape_key,
+    "set_keyframe_handle_type": set_keyframe_handle_type,
+    "copy_keyframes": copy_keyframes,
+    "paste_keyframes": paste_keyframes,
+    "bake_animation": bake_animation,
+    "create_action": create_action,
+    "set_action": set_action,
+    "list_actions": list_actions,
+    "delete_action": delete_action,
+    "nla_add_strip": nla_add_strip,
+    "set_nla_strip_properties": set_nla_strip_properties,
+
+    # === YOUTUBE ENHANCEMENT: Edge Control ===
+    "mark_edge_crease": mark_edge_crease,
+    "clear_edge_crease": clear_edge_crease,
+    "set_edge_bevel_weight": set_edge_bevel_weight,
+    "clear_edge_bevel_weight": clear_edge_bevel_weight,
+    "get_edge_data": get_edge_data,
+    "bisect_mesh": bisect_mesh,
+    "fill_holes": fill_holes,
+    "symmetrize_mesh": symmetrize_mesh,
+    "select_edge_rings": select_edge_rings,
+
+    # === YOUTUBE ENHANCEMENT: Extended Modifiers ===
+    "add_modifier_solidify": add_modifier_solidify,
+    "add_modifier_array": add_modifier_array,
+    "add_modifier_mirror": add_modifier_mirror,
+    "add_modifier_boolean": add_modifier_boolean,
+    "add_modifier_shrinkwrap": add_modifier_shrinkwrap,
+    "add_modifier_curve": add_modifier_curve,
+    "add_modifier_displace": add_modifier_displace,
+    "configure_modifier": configure_modifier,
+    "move_modifier": move_modifier,
+    "list_modifiers": list_modifiers,
+
+    # === YOUTUBE ENHANCEMENT: Enhanced Materials ===
+    "create_material_pbr": create_material_pbr,
+    "attach_texture_to_material": attach_texture_to_material,
+    "create_material_preset": create_material_preset,
+    "set_material_ior": set_material_ior,
+
     # API validation
     "api_validator": api_validator,
 
@@ -714,7 +804,10 @@ SKILL_CATEGORIES = {
     "Constraints": ["set_parent", "clear_parent", "add_constraint_copy_location", "add_constraint_copy_rotation", "add_constraint_copy_scale", "add_constraint_limit_location", "remove_constraint", "list_constraints"],
     "Armature & Rigging": ["create_armature", "add_bone", "edit_bone", "delete_bone", "list_bones", "create_vertex_group", "skin_to_armature", "set_armature_modifier", "add_ik_constraint", "add_armature_constraint", "symmetrize_bones"],
     "Shape Keys": ["add_shape_key", "set_shape_key_value", "set_shape_key_range", "delete_shape_key", "rename_shape_key", "list_shape_keys", "reset_shape_keys", "shape_key_from_mix", "set_shape_key_vertex_position"],
-    "Animation": ["insert_keyframe", "delete_keyframe", "set_current_frame", "get_current_frame", "set_animation_fps", "clear_animation", "list_fcurves", "set_keyframe_interpolation", "evaluate_fcurve"],
+    "Animation": ["insert_keyframe", "delete_keyframe", "set_current_frame", "get_current_frame", "set_animation_fps", "clear_animation", "list_fcurves", "set_keyframe_interpolation", "evaluate_fcurve", "insert_keyframe_bone", "insert_keyframe_shape_key", "set_keyframe_handle_type", "copy_keyframes", "paste_keyframes", "bake_animation", "create_action", "set_action", "list_actions", "delete_action", "nla_add_strip", "set_nla_strip_properties"],
+    "Edge Control (New)": ["mark_edge_crease", "clear_edge_crease", "set_edge_bevel_weight", "clear_edge_bevel_weight", "get_edge_data", "bisect_mesh", "fill_holes", "symmetrize_mesh", "select_edge_rings"],
+    "Extended Modifiers (New)": ["add_modifier_solidify", "add_modifier_array", "add_modifier_mirror", "add_modifier_boolean", "add_modifier_shrinkwrap", "add_modifier_curve", "add_modifier_displace", "configure_modifier", "move_modifier", "list_modifiers"],
+    "Enhanced Materials (New)": ["create_material_pbr", "attach_texture_to_material", "create_material_preset", "set_material_ior"],
     "Sculpting": ["set_sculpt_brush", "set_sculpt_symmetry", "sculpt_draw", "sculpt_smooth", "sculpt_grab", "sculpt_inflate", "sculpt_pinch", "sculpt_flatten", "sculpt_crease", "sculpt_layer", "dyntopo_enabled", "multires_add_level", "multires_apply", "remesh", "get_sculpt_mask"],
     "Physics": ["rigidbody_add", "rigidbody_set_mass", "rigidbody_set_collision_shape", "rigidbody_connect", "rigidbody_bake", "cloth_add", "cloth_pin_vertices", "cloth_bake", "fluid_domain_create", "fluid_emitter_add", "fluid_effector_add", "fluid_bake", "softbody_add", "force_field_add", "collision_add"],
     "Geometry Nodes": ["create_geometry_nodes_tree", "add_geometry_node", "link_geometry_nodes", "set_geometry_node_input", "set_node_tree_output", "bake_geometry_nodes", "geometry_nodes_to_mesh", "create_attribute", "set_attribute_values", "get_attribute_info", "list_attributes", "remove_attribute"],

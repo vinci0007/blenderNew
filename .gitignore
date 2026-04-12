@@ -40,3 +40,9 @@ TASK_STATE.md
 PHASE2_COMPLETION_REPORT.md
 /vbf/config/llm_cache
 add_feedback_patch.py
+reference/youtube-mcp-server/
+docs/youtube_analysis_v2.md
+docs/youtube_blender_analysis.md
+/reference/youtube_analysis
+/reference/blender_python_reference_5_1
+reference/blender_python_reference_5_1.zip
