@@ -13,6 +13,14 @@ from vbf.llm_integration import (
     build_skill_repair_messages,
     generate_skill_plan,
 )
+from vbf.llm_cache import get_cache
+
+
+@pytest.fixture(autouse=True)
+def clear_llm_cache():
+    """每个测试前清空 LLM 缓存。"""
+    cache = get_cache()
+    cache.clear()
 
 
 class TestLoadLLM:
@@ -88,7 +96,7 @@ class TestCallLLMJson:
         mock_llm.chat_json = Mock(return_value={"test": "data"})
 
         messages = [{"role": "user", "content": "test"}]
-        result = await call_llm_json(mock_llm, messages)
+        result = await call_llm_json(mock_llm, messages, use_cache=False)
 
         assert result == {"test": "data"}
         mock_llm.chat_json.assert_called_once_with(messages)
@@ -191,9 +199,10 @@ class TestGenerateSkillPlan:
     """Tests for generate_skill_plan function."""
 
     @pytest.mark.asyncio
-    async def test_raises_without_llm(self):
+    @patch('vbf.llm_integration.load_llm')
+    async def test_raises_without_llm(self, mock_load_llm):
         """Should raise ValueError if LLM not available."""
-        # Pass llm=None explicitly to test the "LLM not configured" path
+        mock_load_llm.return_value = None
         with pytest.raises(ValueError, match="LLM is not configured"):
             await generate_skill_plan(
                 prompt="test",
