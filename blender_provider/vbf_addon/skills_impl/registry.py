@@ -139,6 +139,46 @@ from .modifiers_extended import (
     list_modifiers,
     move_modifier,
 )
+from .mesh_selection import (
+    mesh_loop_select,
+    mesh_select_all,
+    mesh_select_mirror,
+    mesh_select_mode,
+    mesh_select_more_less,
+    mesh_select_non_manifold,
+    mesh_select_similar,
+)
+from .object_operations import (
+    object_convert,
+    object_duplicate,
+    object_hide_set,
+    object_make_local,
+    object_move_to_collection,
+    object_origin_set,
+    object_select_all,
+    object_select_by_type,
+    object_shade_flat,
+    object_shade_smooth,
+)
+from .uv_enhanced import (
+    uv_average_islands_scale,
+    uv_cube_project,
+    uv_cylinder_project,
+    uv_minimize_stretch,
+    uv_pin,
+    uv_project_from_view,
+    uv_sphere_project,
+    uv_stitch,
+)
+from .view3d import (
+    view3d_cursor_set,
+    view3d_localview,
+    view3d_snap_cursor_to_center,
+    view3d_snap_cursor_to_selected,
+    view3d_snap_selected_to_cursor,
+    view3d_view_all,
+    view3d_view_selected,
+)
 from .node_system import (
     add_node_to_group,
     add_shader_node,
@@ -773,6 +813,46 @@ SKILL_REGISTRY: Dict[str, Callable] = {
     "set_cycles_denoise": set_cycles_denoise,
     "set_eevee_samples": set_eevee_samples,
 
+    # Core Object Operations (New - P0 Priority)
+    "object_origin_set": object_origin_set,
+    "object_select_all": object_select_all,
+    "object_select_by_type": object_select_by_type,
+    "object_duplicate": object_duplicate,
+    "object_make_local": object_make_local,
+    "object_shade_smooth": object_shade_smooth,
+    "object_shade_flat": object_shade_flat,
+    "object_move_to_collection": object_move_to_collection,
+    "object_hide_set": object_hide_set,
+    "object_convert": object_convert,
+
+    # Mesh Selection Operations (New - P0 Priority)
+    "mesh_select_all": mesh_select_all,
+    "mesh_select_mode": mesh_select_mode,
+    "mesh_select_similar": mesh_select_similar,
+    "mesh_loop_select": mesh_loop_select,
+    "mesh_select_mirror": mesh_select_mirror,
+    "mesh_select_more_less": mesh_select_more_less,
+    "mesh_select_non_manifold": mesh_select_non_manifold,
+
+    # UV Enhanced Operations (New - P0 Priority)
+    "uv_project_from_view": uv_project_from_view,
+    "uv_cylinder_project": uv_cylinder_project,
+    "uv_sphere_project": uv_sphere_project,
+    "uv_cube_project": uv_cube_project,
+    "uv_minimize_stretch": uv_minimize_stretch,
+    "uv_stitch": uv_stitch,
+    "uv_average_islands_scale": uv_average_islands_scale,
+    "uv_pin": uv_pin,
+
+    # View3D Operations (New - P0 Priority)
+    "view3d_cursor_set": view3d_cursor_set,
+    "view3d_snap_cursor_to_selected": view3d_snap_cursor_to_selected,
+    "view3d_snap_cursor_to_center": view3d_snap_cursor_to_center,
+    "view3d_snap_selected_to_cursor": view3d_snap_selected_to_cursor,
+    "view3d_view_selected": view3d_view_selected,
+    "view3d_view_all": view3d_view_all,
+    "view3d_localview": view3d_localview,
+
     # Full Blender API coverage gateway
     "py_get": py_get,
     "py_set": py_set,
@@ -787,10 +867,10 @@ SKILL_REGISTRY: Dict[str, Callable] = {
 
 # Metadata for documentation
 SKILL_CATEGORIES = {
-    "Scene": ["scene_clear", "delete_object", "rename_object"],
+    "Scene": ["scene_clear", "delete_object", "rename_object", "object_origin_set", "object_select_all", "object_select_by_type", "object_duplicate", "object_make_local", "object_shade_smooth", "object_shade_flat", "object_move_to_collection", "object_hide_set", "object_convert"],
     "Primitives": ["create_primitive", "create_beveled_box", "create_nested_cones"],
-    "Geometry Processing": ["extrude_faces", "inset_faces", "subdivide_mesh", "triangulate_faces", "remove_doubles", "recalculate_normals", "scale_normals", "shade_smooth", "shade_flat", "set_sharp_edges", "bridge_edge_loops"],
-    "UV Mapping": ["unwrap_mesh", "smart_project_uv", "lightmap_pack", "mark_seam", "pack_uv_islands", "scale_uv", "arrange_uvs", "add_uv_map", "set_active_uv_map"],
+    "Geometry Processing": ["extrude_faces", "inset_faces", "subdivide_mesh", "triangulate_faces", "remove_doubles", "recalculate_normals", "scale_normals", "shade_smooth", "shade_flat", "set_sharp_edges", "bridge_edge_loops", "mesh_select_all", "mesh_select_mode", "mesh_select_similar", "mesh_loop_select", "mesh_select_mirror", "mesh_select_more_less", "mesh_select_non_manifold"],
+    "UV Mapping": ["unwrap_mesh", "smart_project_uv", "lightmap_pack", "mark_seam", "pack_uv_islands", "scale_uv", "arrange_uvs", "add_uv_map", "set_active_uv_map", "uv_project_from_view", "uv_cylinder_project", "uv_sphere_project", "uv_cube_project", "uv_minimize_stretch", "uv_stitch", "uv_average_islands_scale", "uv_pin"],
     "Textures": ["import_image_texture", "create_image_texture", "add_texture_to_material", "set_texture_mapping", "add_normal_map", "bake_texture", "save_image"],
     "Curves & Text": ["create_curve_bezier", "create_curve_circle", "create_text", "set_text_content", "set_text_properties", "set_curve_bevel", "set_curve_taper", "set_curve_extrude", "array_along_curve", "curve_to_mesh", "text_to_curve", "set_font"],
     "Transforms": ["apply_transform", "spatial_query", "move_object_anchor_to_point"],
