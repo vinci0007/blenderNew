@@ -6,6 +6,100 @@
 
 ---
 
+## [2.2.0] - 2026-04-13
+
+### 新增 (Added)
+
+#### 统一适配器架构 (v2)
+- **统一 OpenAI 兼容适配器** (vbf/adapters/)
+- base_adapter.py - 通用适配器基类，RPC技能加载
+- openai_compat_adapter.py - 统一适配所有OpenAI兼容API
+- 配置驱动，无硬编码模型分支
+- 支持流式响应（可选）
+- 工厂函数 get_adapter() 自动选择适配器
+
+#### 支持的模型
+- OpenAI: gpt-4, gpt-4o, gpt-3.5
+- 中国模型: GLM-4, Kimi, Qwen, MiniMax
+- 本地模型: Ollama（few-shot示例）
+- 自定义端点（通过 vbf/config/llm_config.json 配置）
+
+#### RPC技能同步
+- 初始化时通过WebSocket RPC从Blender实时获取技能
+- 批量获取技能定义（每批50个）
+- 支持分离部署（客户端无需访问插件目录）
+
+#### YouTube 技能扩展
+- 分析 57 个 YouTube 教程视频
+- 新增 69 个关键技能 (edge_crease, bevel_weight, uv_project_from_view 等)
+- 补充 views3d 操作技能 (view3d_view_all, view3d_snap_cursor_to_center 等)
+- 扩展修改器技能阵列 (add_modifier_array, add_modifier_solidify 等)
+- 增强动画技能 (insert_keyframe_bone, bake_animation, NLA 等)
+- 硬表面专用技能 (mark_edge_crease, set_edge_bevel_weight)
+
+### 修复 (Fixed)
+
+#### 技能文档同步
+- **362 个技能** 完整同步 SKILL.md ↔ categories/*.md
+- 修复 76 个丢失技能 (存在于 categories 但不在主文档)
+- 修复 13 个技能的无参数表问题 (asset_list, compositor_list_nodes 等)
+
+#### 架构 (Architecture)
+
+#### 适配器架构 v2 改进
+- **SkillRegistry 单例** (`skill_registry.py`) - 全局技能缓存
+  - 技能加载后全局共享，多适配器实例复用
+  - 线程安全的异步锁保护
+  - 支持 force_refresh 强制刷新
+
+- **响应格式配置化** - 响应路径从硬编码改为配置驱动
+  - `response_content_path` 支持点号路径: `choices[0].message.content`
+  - 每个模型可配置独立响应路径
+  - 默认模型使用 `llm_config.json` 配置
+  - **api_key 优先从配置读取** - 支持 `llm_config.json` 直接存储的 API Key
+  - `response_format` 配置化支持 json_object
+
+- **Streaming 支持完善** - `format_messages(stream=True)` 参数
+  - 传递 stream 参数影响请求格式
+  - 添加流式响应系统提示
+
+#### 项目结构调整（Breaking）
+- `vbf/adapters/` 从 `blender_provider` 移至项目根目录
+- 适配器库独立于 Blender 插件，支持任意 Python 环境
+- 新增 `_prompts/universal_system_prompt.md` 多模型系统提示词
+- SKILL.md 从 299 行导航指南扩展为 362 技能完整定义文档
+
+### 架构 (Architecture)
+
+#### 适配器架构 v2 改进
+- **SkillRegistry 单例** (`skill_registry.py`) - 全局技能缓存
+- 技能加载后全局共享，多适配器实例复用
+- 线程安全的异步锁保护，支持 force_refresh 强制刷新
+
+- **响应格式配置化** - 响应路径从硬编码改为配置驱动
+- `response_content_path` 支持点号路径: `choices[0].message.content`
+- 每个模型可配置独立响应路径，默认模型使用 `llm_config.json`
+
+- **OpenAICompatAdapter.call_llm()** - 统一 LLM 调用方法
+- 整合 `build_api_request` + HTTP 调用 + `parse_response`
+- 支持 TimeoutError / ConnectionError 区分（用于重试逻辑）
+
+#### 适配器完全集成 (Migration)
+- **client.py 完全迁移到 vbf/adapters/**
+- `run_task()` → `_ensure_adapter()` + `_adapter_call()`
+- `generate_skill_plan()` → `adapter.format_messages()` + `_adapter_call()`
+- 移除 `build_skill_plan_messages()` / `build_skill_repair_messages()`
+- 保留 `llm_rate_limiter`（速率限制）和 `llm_cache`（响应缓存）
+- 移除 `llm_integration.py` 中的 plan 生成函数（由适配器接管）
+
+### 文档 (Documentation)
+
+- 新架构说明文档
+- 29 个分类技能文档 (00_gateway～17_asset)
+- INDEX.md 工作流索引
+
+---
+
 ## [2.1.0] - 2026-04-12
 
 ### 新增 (Added)

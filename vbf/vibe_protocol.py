@@ -1,7 +1,6 @@
 import copy
 from typing import Any, Dict
 
-
 def resolve_refs_in_value(value: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
     """
     Resolve {"$ref": "step_id.data.key"} into actual values from step_results.
@@ -23,6 +22,9 @@ def resolve_refs_in_value(value: Any, step_results: Dict[str, Dict[str, Any]]) -
         raise ValueError(f"Ref path too short: {ref}")
 
     step_id = parts[0]
+    # Normalize: LLM may use "step_001" format while step_results uses "001"
+    if step_id.startswith("step_"):
+        step_id = step_id[len("step_") :]
     root = parts[1]
     key_path = parts[2:]
 
@@ -44,7 +46,6 @@ def resolve_refs_in_value(value: Any, step_results: Dict[str, Dict[str, Any]]) -
 
     return node
 
-
 def resolve_refs(args: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
     """Recursively resolve $ref tokens in nested dict/list structures."""
     args_copy = copy.deepcopy(args)
@@ -63,7 +64,6 @@ def resolve_refs(args: Any, step_results: Dict[str, Dict[str, Any]]) -> Any:
 
     return rec(args_copy)
 
-
 def merge_step_results_for_prompt(step_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Compact step results for inclusion in LLM repair prompts."""
     compact: Dict[str, Any] = {}
@@ -73,4 +73,3 @@ def merge_step_results_for_prompt(step_results: Dict[str, Dict[str, Any]]) -> Di
         else:
             compact[step_id] = {"ok": False, "error": payload.get("error", payload)}
     return compact
-

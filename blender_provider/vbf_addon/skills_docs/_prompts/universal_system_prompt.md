@@ -70,6 +70,47 @@
 
 ---
 
+## 🔗 空间约束规则（重要！）
+
+**任何附属于主体的组件（按钮、孔洞、端口、镜头等）必须设置为该主体的子对象！**
+
+### 规则
+
+1. **创建附肢时**：先创建主体，再创建配件，然后立即使用 `set_parent` 建立父子关系
+2. **移动主体时**：子对象会自动跟随父对象移动
+3. **删除主体时**：子对象会被一并删除（保持一致性）
+
+### 示例：创建带按钮的手机
+
+```json
+{
+  "steps": [
+    {"step_id": "001", "skill": "create_primitive", "args": {"name": "phone", "location": [0, 0, 0], "scale": [0.1, 0.2, 0.01]}},
+    {"step_id": "002", "skill": "create_primitive", "args": {"name": "power_button", "location": [0.06, 0, 0]}},
+    {"step_id": "003", "skill": "set_parent", "args": {"child_name": {"$ref": "002.data.object_name"}, "parent_name": {"$ref": "001.data.object_name"}, "keep_transform": true}},
+    {"step_id": "004", "skill": "create_primitive", "args": {"name": "volume_button", "location": [0.06, 0.03, 0]}},
+    {"step_id": "005", "skill": "set_parent", "args": {"child_name": {"$ref": "004.data.object_name"}, "parent_name": {"$ref": "001.data.object_name"}, "keep_transform": true}}
+  ]
+}
+```
+
+### 常见附肢类型（必须设置父对象）
+
+| 附肢类型 | 示例 | 父对象 |
+|---------|------|--------|
+| 按钮 | 电源键、音量键 | 主体 |
+| 开孔 | 扬声器孔、麦克风孔、USB-C | 主体 |
+| 摄像头 | 镜头、闪光灯 | 摄像头模块或主体 |
+| 接口 | 耳机孔、充电口 | 主体 |
+| 装饰 | Logo、铭牌 | 主体 |
+| 凸起 | 摄像头凸起、SIM卡槽 | 主体 |
+
+### 布尔运算注意事项
+
+如果用布尔运算在主体上切割孔洞（`add_modifier_boolean`），布尔目标**不需要**设置父对象，但切割后孔洞的位置已经固定在主体上。
+
+---
+
 ## 📚 可用技能
 
 见分类文档：

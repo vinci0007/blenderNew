@@ -248,10 +248,10 @@
 - **Level 10+**: 持续探索和学习
 
 ### 资源参考
-- **完整技能文档**: [SKILL.md](../SKILL.md)
+- **完整技能文档**: [SKILL.md](SKILL.md)
 - **原完整参考**: [blender_provider/SKILL.md](../../../SKILL.md)
 - **A-Z 索引**: [INDEX.md](../INDEX.md)
-- **示例代码**: [工作流示例](../SKILL.md#workflow-examples)
+- **示例代码**: [工作流示例](SKILL.md#workflow-examples)
 
 ### 调试技巧
 1. 使用 `api_validator` 验证 API 路径

@@ -6,9 +6,9 @@ from .utils import ensure_object_mode, fmt_err, vec3
 
 
 def create_primitive(
-    primitive_type: str,
-    name: str,
-    location: List[float],
+    primitive_type: str = "cube",
+    name: str = "Primitive",
+    location: List[float] = None,
     rotation_euler: List[float] | None = None,
     scale: List[float] | None = None,
     size: List[float] | None = None,
@@ -37,7 +37,7 @@ def create_primitive(
     """
     try:
         ensure_object_mode()
-        loc = vec3(location)
+        loc = vec3(location) if location else [0, 0, 0]
         rot = rotation_euler or [0.0, 0.0, 0.0]
 
         new_obj = None

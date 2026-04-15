@@ -139,19 +139,46 @@ class RateLimiter:
                         coro_factory(*args, **kwargs),
                         timeout=self.config.call_timeout_seconds
                     )
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    # TimeoutError: asyncio.wait_for timed out -> model slow/processing
+                    # CancelledError: BaseException (not caught by 'except Exception')
+                    #   from asyncio.to_thread cancellation after timeout fires.
+                    # Both mean the model needs more time: retry with backoff.
                     self._failed_calls += 1
                     if attempt < max_attempts:
                         delay = delay_base * (2 ** attempt)
+                        print(f"[VBF] Timeout/cancelled. Retrying in {delay}s... (attempt {attempt + 1}/{max_attempts})")
                         await asyncio.sleep(delay)
                     else:
-                        raise
-                except Exception:
-                    self._failed_calls += 1
-                    if attempt < max_attempts:
-                        delay = delay_base * (2 ** attempt)
-                        await asyncio.sleep(delay)
+                        raise TimeoutError(
+                            f"LLM call timed out after {self.config.call_timeout_seconds}s. "
+                            "Consider increasing call_timeout_seconds in llm_config.json."
+                        ) from None
+                except Exception as e:
+                    # Other errors: check if retryable (rate limit / server errors)
+                    error_str = str(e).lower()
+                    is_rate_limit = (
+                        isinstance(e, RuntimeError)
+                        and (
+                            "429" in error_str
+                            or "rate limit" in error_str
+                            or "too many request" in error_str
+                        )
+                    )
+                    is_server_error = (
+                        isinstance(e, RuntimeError)
+                        and any(code in error_str for code in ["500", "502", "503"])
+                    )
+                    if is_rate_limit or is_server_error:
+                        self._failed_calls += 1
+                        if attempt < max_attempts:
+                            delay = delay_base * (2 ** attempt) * 2
+                            print(f"[VBF] Retryable error: {e}. Retrying in {delay:.1f}s... (attempt {attempt + 1}/{max_attempts})")
+                            await asyncio.sleep(delay)
+                        else:
+                            raise
                     else:
+                        # Non-retryable (parse errors, 400 bad request, etc.)
                         raise
         finally:
             self.release()
@@ -224,8 +251,8 @@ def load_throttle_config() -> Optional[LLM_API_Throttle_Config]:
     import os
 
     config_paths = [
-        os.path.join(os.path.dirname(__file__), "config", "llm.json"),
-        os.path.join("vbf", "config", "llm.json"),
+        os.path.join(os.path.dirname(__file__), "config", "llm_config.json"),
+        os.path.join("vbf", "config", "llm_config.json"),
     ]
 
     for path in config_paths:
