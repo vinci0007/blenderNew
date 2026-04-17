@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import queue
 import threading
+import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import bpy # type: ignore
 
-from .skills import SKILL_REGISTRY
+try:
+    from .skills import SKILL_REGISTRY
+except Exception:
+    # Fallback for script-style loading without package context.
+    from skills import SKILL_REGISTRY  # type: ignore
 
 try:
     import websockets # type: ignore
@@ -20,6 +26,115 @@ except Exception: # pragma: no cover
 
 HOST_ENV = "VBF_WS_HOST"
 PORT_ENV = "VBF_WS_PORT"
+
+
+def _capture_object_state(obj: Any, name_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Capture LIGHT-level geometry state for a single Blender object."""
+    if obj is None:
+        return None
+    try:
+        name = name_hint or getattr(obj, "name", None)
+        if not name:
+            return None
+        obj_type = getattr(obj, "type", "UNKNOWN")
+        obj_data = {
+            "name": name,
+            "type": obj_type,
+            "location": list(getattr(obj, "location", [0.0, 0.0, 0.0])),
+            "dimensions": list(getattr(obj, "dimensions", [0.0, 0.0, 0.0])),
+        }
+
+        if obj_type == "MESH" and hasattr(obj, "data") and hasattr(obj.data, "vertices"):
+            mesh = obj.data
+            obj_data["vertices"] = len(mesh.vertices)
+            obj_data["polygons"] = len(mesh.polygons)
+            obj_data["edges"] = len(mesh.edges)
+        else:
+            obj_data["vertices"] = 0
+            obj_data["polygons"] = 0
+            obj_data["edges"] = 0
+
+        if hasattr(obj, "material_slots"):
+            obj_data["materials"] = len(obj.material_slots)
+        else:
+            obj_data["materials"] = 0
+        return obj_data
+    except Exception:
+        return None
+
+
+def _capture_target_state(target_names: list) -> Dict[str, Any]:
+    """
+    Capture LIGHT-level geometry state for specified objects.
+
+    This is called automatically after each skill execution to provide
+    post-state data for closed-loop feedback validation.
+
+    Args:
+        target_names: List of object names to capture. If empty, captures nothing.
+
+    Returns:
+        Dict mapping object name to geometry data dict.
+    """
+    if not target_names:
+        return {}
+
+    result = {}
+    for name in target_names:
+        try:
+            obj = bpy.data.objects.get(name)
+            obj_data = _capture_object_state(obj, name_hint=name)
+            if obj_data:
+                result[name] = obj_data
+
+        except Exception:
+            # Silently skip objects we can't capture
+            pass
+
+    return result
+
+
+def _capture_scene_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Capture a LIGHT-level snapshot for all objects in the current scene."""
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for obj in bpy.data.objects:
+        obj_state = _capture_object_state(obj, name_hint=getattr(obj, "name", None))
+        if obj_state and "name" in obj_state:
+            snapshot[obj_state["name"]] = obj_state
+    return snapshot
+
+
+def _extract_target_objects_from_args(args: Dict, data: Any) -> List[str]:
+    """Extract target object names from skill arguments.
+
+    Checks common parameter names and result data to find object names
+    that should have post-state captured.
+    """
+    targets = []
+
+    # Check args for common object name parameters
+    for key in ["name", "object_name", "target", "object"]:
+        val = args.get(key)
+        if val and isinstance(val, str):
+            targets.append(val)
+
+    # Check result data for object_name
+    if isinstance(data, dict):
+        obj_name = data.get("object_name")
+        if obj_name and isinstance(obj_name, str) and obj_name not in targets:
+            targets.append(obj_name)
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for t in targets:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+
+    return unique
+
+
 
 def _extract_skill_schema(fn, compact=False) -> dict:
     """Extract skill schema with optional compact mode to save bandwidth."""
@@ -63,6 +178,22 @@ class VBFWebSocketServer:
         self._step_undo_map: Dict[str, int] = {}
         self._current_undo_count = 0
 
+        # Realtime scene delta cache (depsgraph-driven).
+        self._scene_lock = threading.Lock()
+        self._scene_seq = 0
+        self._scene_state: Dict[str, Dict[str, Any]] = {}
+        self._pending_scene_delta: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._scene_events: List[Dict[str, Any]] = []
+        self._scene_events_max = 500
+        self._scene_dropped = False
+        self._delta_flush_interval_s = 0.1
+        self._last_flush_monotonic = time.monotonic()
+        self._depsgraph_pre_count = 0
+        self._depsgraph_post_count = 0
+
+        self._depsgraph_pre_handler = None
+        self._depsgraph_post_handler = None
+
     @property
     def running(self) -> bool:
         return self._running
@@ -72,6 +203,9 @@ class VBFWebSocketServer:
             return
         if websockets is None:
             raise ImportError("Addon requires Python package `websockets` in Blender's Python environment.")
+
+        self._initialize_scene_cache()
+        self._register_depsgraph_handlers()
 
         self._running = True
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
@@ -87,6 +221,7 @@ class VBFWebSocketServer:
         if not self._running:
             return
         self._running = False
+        self._unregister_depsgraph_handlers()
         if self._loop:
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
@@ -159,6 +294,39 @@ class VBFWebSocketServer:
                             "error": {"code": -32000, "message": "Internal server error during rollback"},
                         }
                     await websocket.send(json.dumps(result_payload))
+                    continue
+
+                if method == "vbf.get_scene_delta":
+                    if not isinstance(params, dict):
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32602, "message": "Invalid params"},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+                    since_seq = params.get("since_seq", 0)
+                    try:
+                        since_seq = int(since_seq)
+                    except Exception:
+                        since_seq = 0
+                    data = self._get_scene_delta(since_seq)
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"ok": True, "data": data},
+                    }
+                    await websocket.send(json.dumps(resp))
+                    continue
+
+                if method == "vbf.get_scene_snapshot":
+                    data = self._get_scene_snapshot()
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"ok": True, "data": data},
+                    }
+                    await websocket.send(json.dumps(resp))
                     continue
 
                 if method != "vbf.execute_skill":
@@ -269,6 +437,20 @@ class VBFWebSocketServer:
                     if step_id:
                         self._current_undo_count += 1
 
+                    # Normalize skill result payload to dict for downstream feedback fields.
+                    if not isinstance(data, dict):
+                        data = {"value": data}
+
+                    # Include executed skill name for feedback/debug prompts.
+                    data.setdefault("_skill", skill)
+
+                    # Auto-capture post-state for closed-loop feedback.
+                    target_objects = _extract_target_objects_from_args(args, data)
+                    if target_objects:
+                        post_state = _capture_target_state(target_objects)
+                        if post_state:
+                            data["_post_state"] = post_state
+
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": data}}
 
             except ValueError as e:
@@ -307,6 +489,150 @@ class VBFWebSocketServer:
                     loop.call_soon_threadsafe(job.fut.set_result, resp)
             except Exception:
                 pass
+
+    def _initialize_scene_cache(self) -> None:
+        """Initialize full scene cache used by delta/snapshot RPC."""
+        with self._scene_lock:
+            self._scene_state = _capture_scene_snapshot()
+            self._scene_seq = 0
+            self._pending_scene_delta.clear()
+            self._scene_events.clear()
+            self._scene_dropped = False
+            self._last_flush_monotonic = time.monotonic()
+
+    def _register_depsgraph_handlers(self) -> None:
+        """Register depsgraph handlers used for realtime delta collection."""
+        self._unregister_depsgraph_handlers()
+
+        def _on_depsgraph_update_pre(scene, depsgraph):  # pragma: no cover - Blender runtime callback
+            try:
+                self._depsgraph_pre_count += 1
+            except Exception:
+                pass
+
+        def _on_depsgraph_update_post(scene, depsgraph):  # pragma: no cover - Blender runtime callback
+            try:
+                self._depsgraph_post_count += 1
+                self._collect_depsgraph_updates(depsgraph)
+            except Exception:
+                pass
+
+        self._depsgraph_pre_handler = _on_depsgraph_update_pre
+        self._depsgraph_post_handler = _on_depsgraph_update_post
+        try:
+            bpy.app.handlers.depsgraph_update_pre.append(self._depsgraph_pre_handler)
+        except Exception:
+            self._depsgraph_pre_handler = None
+        try:
+            bpy.app.handlers.depsgraph_update_post.append(self._depsgraph_post_handler)
+        except Exception:
+            self._depsgraph_post_handler = None
+
+    def _unregister_depsgraph_handlers(self) -> None:
+        """Unregister depsgraph handlers if they were registered."""
+        pre = self._depsgraph_pre_handler
+        post = self._depsgraph_post_handler
+        if pre:
+            try:
+                if pre in bpy.app.handlers.depsgraph_update_pre:
+                    bpy.app.handlers.depsgraph_update_pre.remove(pre)
+            except Exception:
+                pass
+        if post:
+            try:
+                if post in bpy.app.handlers.depsgraph_update_post:
+                    bpy.app.handlers.depsgraph_update_post.remove(post)
+            except Exception:
+                pass
+        self._depsgraph_pre_handler = None
+        self._depsgraph_post_handler = None
+
+    def _collect_depsgraph_updates(self, depsgraph: Any) -> None:
+        """Collect object updates from depsgraph into a throttled delta buffer."""
+        updated_any = False
+        with self._scene_lock:
+            for update in getattr(depsgraph, "updates", []):
+                id_block = getattr(update, "id", None)
+                if not isinstance(id_block, bpy.types.Object):
+                    continue
+                obj_name = getattr(id_block, "name", None)
+                if not obj_name:
+                    continue
+                obj = bpy.data.objects.get(obj_name)
+                if obj is None:
+                    self._pending_scene_delta[obj_name] = None
+                    updated_any = True
+                    continue
+                try:
+                    eval_obj = obj.evaluated_get(depsgraph)
+                except Exception:
+                    eval_obj = obj
+                state = _capture_object_state(eval_obj, name_hint=obj_name)
+                if state:
+                    self._pending_scene_delta[obj_name] = state
+                    updated_any = True
+
+            now = time.monotonic()
+            if updated_any and (now - self._last_flush_monotonic >= self._delta_flush_interval_s):
+                self._flush_pending_scene_delta_locked()
+
+    def _flush_pending_scene_delta_locked(self) -> None:
+        if not self._pending_scene_delta:
+            self._last_flush_monotonic = time.monotonic()
+            return
+
+        deltas: Dict[str, Any] = {}
+        for obj_name, state in self._pending_scene_delta.items():
+            if state is None:
+                self._scene_state.pop(obj_name, None)
+                deltas[obj_name] = {"deleted": True}
+            else:
+                self._scene_state[obj_name] = state
+                deltas[obj_name] = state
+
+        self._pending_scene_delta.clear()
+        self._scene_seq += 1
+        self._scene_events.append({"seq": self._scene_seq, "deltas": deltas})
+        if len(self._scene_events) > self._scene_events_max:
+            overflow = len(self._scene_events) - self._scene_events_max
+            del self._scene_events[:overflow]
+            self._scene_dropped = True
+        self._last_flush_monotonic = time.monotonic()
+
+    def _get_scene_delta(self, since_seq: int) -> Dict[str, Any]:
+        with self._scene_lock:
+            if self._pending_scene_delta:
+                self._flush_pending_scene_delta_locked()
+
+            latest_seq = self._scene_seq
+            events = self._scene_events
+            oldest_seq = events[0]["seq"] if events else latest_seq
+
+            dropped = self._scene_dropped and since_seq < oldest_seq
+            merged: Dict[str, Any] = {}
+            for evt in events:
+                if evt["seq"] > since_seq:
+                    merged.update(evt["deltas"])
+
+            # Once caller observed latest watermark, clear dropped flag.
+            if since_seq >= latest_seq:
+                self._scene_dropped = False
+
+            return {
+                "latest_seq": latest_seq,
+                "deltas": copy.deepcopy(merged),
+                "dropped": bool(dropped),
+                "flush_interval_ms": int(self._delta_flush_interval_s * 1000),
+            }
+
+    def _get_scene_snapshot(self) -> Dict[str, Any]:
+        with self._scene_lock:
+            if self._pending_scene_delta:
+                self._flush_pending_scene_delta_locked()
+            return {
+                "seq": self._scene_seq,
+                "objects": copy.deepcopy(self._scene_state),
+            }
 
 _SERVER: Optional[VBFWebSocketServer] = None
 

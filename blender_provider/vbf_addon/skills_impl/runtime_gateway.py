@@ -8,9 +8,15 @@ try:
     from ..skill_runtime import py_call, py_get, py_set
     from ..skills_impl import utils
 except ImportError:
-    # Fallback: Blender loads the folder as a plain script (no package context)
-    from skill_runtime import py_call, py_get, py_set  # type: ignore
-    from skills_impl import utils  # type: ignore
+    # Fallback order:
+    # 1) explicit addon package import
+    # 2) plain script-style loading (no package context)
+    try:
+        from vbf_addon.skill_runtime import py_call, py_get, py_set  # type: ignore
+        from vbf_addon.skills_impl import utils  # type: ignore
+    except ImportError:
+        from skill_runtime import py_call, py_get, py_set  # type: ignore
+        from skills_impl import utils  # type: ignore
 
 
 def _resolve_operator(operator_id: str):

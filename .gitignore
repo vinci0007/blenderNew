@@ -54,3 +54,8 @@ docs/archived/architecture_analysis.md
 vbf/config/llm_config.json.copy
 TASK_STATE_SNAPSHOT.md
 vbf/config/last_gen_fail.txt
+/vbf/agent/memory/test-history
+/vbf/agent/memory/test-msgs
+/vbf/agent/memory/test-prefs
+/vbf/agent/memory/test-history-f4ed6512
+/vbf/agent/memory

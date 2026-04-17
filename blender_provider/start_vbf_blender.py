@@ -5,6 +5,7 @@ It starts the VBF WebSocket server and polls the job queue.
 
 import os
 import sys
+import importlib
 
 
 def _ensure_module_path() -> None:
@@ -19,11 +20,20 @@ def _ensure_module_path() -> None:
 
 _ensure_module_path()
 
-from blender_provider import vbf_addon  # noqa: E402
+def _import_addon_module():
+    # Preferred: standalone addon package installed in Blender addons directory.
+    try:
+        return importlib.import_module("vbf_addon")
+    except Exception:
+        pass
+    # Fallback: repo-local package layout.
+    return importlib.import_module("blender_provider.vbf_addon")
+
+
+vbf_addon = _import_addon_module()
 
 
 vbf_addon.register()
 vbf_addon.start_vbf_ws_server()
 
 print("VBF WS server started.")
-

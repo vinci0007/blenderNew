@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import bpy  # type: ignore
 
-from .server import get_server
+try:
+    from .server import get_server
+except Exception:
+    # Fallback for script-style loading without package context.
+    from server import get_server  # type: ignore
 
 
 class VBF_PT_main(bpy.types.Panel):
@@ -30,4 +34,3 @@ class VBF_PT_main(bpy.types.Panel):
 
 
 __all__ = ["VBF_PT_main"]
-

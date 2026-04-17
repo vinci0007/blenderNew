@@ -52,6 +52,10 @@ class FeedbackCheckpoint:
     question: str
     options: List[str]
     hint: str
+    # Extended fields for closed-loop integration
+    geometry_delta: Optional[Dict[str, Any]] = None  # Geometry changes at this checkpoint
+    llm_analysis: Optional[Dict[str, Any]] = None  # LLM quality analysis result
+    stage_objects: Optional[List[str]] = None  # Objects in this stage
 
 
 # Predefined feedback checkpoints for 18-stage workflow

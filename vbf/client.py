@@ -191,6 +191,44 @@ class VBFClient:
         except Exception:
             return None
 
+    async def get_scene_delta(self, since_seq: int = 0) -> Dict[str, Any]:
+        """Get aggregated scene delta from depsgraph event stream."""
+        try:
+            resp = await self._ws.call(
+                method="vbf.get_scene_delta",
+                params={"since_seq": int(since_seq)},
+            )
+            if not isinstance(resp, dict):
+                return {"ok": False, "error": "Invalid scene delta response"}
+            return resp
+        except JsonRpcError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "method_not_found": e.code == -32601,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def get_scene_snapshot(self) -> Dict[str, Any]:
+        """Get full lightweight scene snapshot for cache bootstrap/resync."""
+        try:
+            resp = await self._ws.call(
+                method="vbf.get_scene_snapshot",
+                params={},
+            )
+            if not isinstance(resp, dict):
+                return {"ok": False, "error": "Invalid scene snapshot response"}
+            return resp
+        except JsonRpcError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "method_not_found": e.code == -32601,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
         try:
             return await self._ws.call(method="vbf.rollback_to_step", params={"step_id": step_id})
@@ -551,3 +589,247 @@ Consider the current scene state when planning.
                 f"Plan generation failed: {e}",
                 prompt, save_path, allowed_skills=allowed_skills, cause=e
             )
+
+    # --- Closed-loop task execution (Phase 1) ---
+
+    async def run_task_with_feedback(
+        self,
+        prompt: str,
+        resume_state_path: Optional[str] = None,
+        save_state_path: Optional[str] = None,
+        style: Optional[str] = None,
+        enable_auto_check: bool = True,
+        enable_llm_feedback: bool = True,
+    ) -> Dict[str, Any]:
+        """Execute task with closed-loop feedback control.
+
+        Key differences from run_task():
+        1. Capture scene state BEFORE planning and inject into prompt
+        2. Validate each skill execution with lightweight GeometryDelta rules
+        3. Trigger LLM analysis at stage boundaries
+        4. Replan locally from failure point when quality/validation fails
+        """
+        from .feedback_control import ClosedLoopControl
+        from .geometry_capture import IncrementalSceneCapture, CaptureLevel
+
+        await self.ensure_connected()
+
+        _save_path = save_state_path or self._default_save_path
+        os.makedirs(os.path.dirname(_save_path), exist_ok=True)
+
+        if not self._is_llm_enabled():
+            raise self._create_interrupt(
+                "LLM not configured. Set VBF_LLM_BASE_URL/API_KEY/MODEL",
+                prompt, _save_path
+            )
+
+        allowed_skills = await self.list_skills()
+        if not allowed_skills:
+            raise self._create_interrupt(
+                "No skills returned from Blender addon. Check if VBF addon is enabled",
+                prompt, _save_path
+            )
+
+        if resume_state_path and os.path.exists(resume_state_path):
+            print(f"[VBF-Feedback] Resuming from: {resume_state_path}")
+            saved = TaskState.load(resume_state_path)
+            plan = saved.plan
+            steps = saved.steps
+            step_results = saved.step_results
+            i = saved.current_step_index
+        else:
+            # Apply style template to prompt (same behavior as run_task)
+            if style:
+                style_manager = get_style_manager()
+                if style_manager.style_exists(style):
+                    styled_prompt = style_manager.apply_style_to_prompt(style, prompt)
+                    print(f"[VBF-Feedback] Using style: {style}")
+                else:
+                    available = ", ".join(style_manager.list_styles()[:5])
+                    print(f"[VBF-Feedback] Warning: Unknown style '{style}'. Available: {available}...")
+                    styled_prompt = prompt
+            else:
+                styled_prompt = prompt
+
+            print("[VBF-Feedback] Capturing current scene state...")
+            scene = await self.capture_scene_state()
+            print(f"[VBF-Feedback] Scene has {len(scene._objects)} objects")
+
+            scene_aware_prompt = self._inject_scene_context(styled_prompt, scene)
+            plan, steps = await self._plan_skill_task(scene_aware_prompt, allowed_skills, _save_path)
+            step_results = {}
+            i = 0
+            print(f"[VBF-Feedback] Generated plan with {len(steps)} steps")
+
+        max_replans = int(plan.get("execution", {}).get("max_replans", 5))
+        replan_count = 0
+
+        loop = ClosedLoopControl(
+            client=self,
+            enable_auto_check=enable_auto_check,
+            enable_llm_feedback=enable_llm_feedback,
+            capture_level=CaptureLevel.LIGHT,
+            task_prompt=prompt,
+        )
+        scene_capture = IncrementalSceneCapture(self)
+
+        while i < len(steps):
+            step = steps[i]
+            step_id = step.get("step_id", f"step_{i:03d}")
+
+            decision, post_state = await loop.execute_with_feedback(step, step_results, scene_capture)
+
+            if post_state:
+                # Keep capture cache warm for next-step delta computation.
+                scene_capture._cache.update(post_state)
+
+            if decision.action in {"replan", "checkpoint"}:
+                replan_count += 1
+                if replan_count > max_replans:
+                    raise self._create_interrupt(
+                        f"Exceeded max replans ({max_replans}) at step {step_id}",
+                        prompt,
+                        _save_path,
+                        plan=plan,
+                        steps=steps,
+                        step_results=step_results,
+                        current_index=i,
+                        allowed_skills=allowed_skills,
+                    )
+
+                reason = decision.detail.get("reason", decision.action)
+                replan_from_idx = i
+                feedback_detail = dict(decision.detail or {})
+
+                # For stage-boundary quality failures, roll back to the beginning of the
+                # poor-quality stage so draft artifacts do not leak into subsequent stages.
+                if decision.action == "checkpoint":
+                    rollback_step_id = decision.detail.get("rollback_step_id")
+                    if rollback_step_id:
+                        rollback_resp = await self.rollback_to_step(rollback_step_id)
+                        if rollback_resp.get("ok"):
+                            rollback_idx = next(
+                                (idx for idx, s in enumerate(steps) if s.get("step_id") == rollback_step_id),
+                                None,
+                            )
+                            if rollback_idx is not None and rollback_idx <= i:
+                                rolled_back_steps = steps[rollback_idx:i]
+                                for rolled_step in rolled_back_steps:
+                                    sid = rolled_step.get("step_id")
+                                    if sid:
+                                        step_results.pop(sid, None)
+                                scene_capture.invalidate_cache()
+                                replan_from_idx = rollback_idx
+                                feedback_detail["rolled_back_to_step"] = rollback_step_id
+                                feedback_detail["rolled_back_to_index"] = rollback_idx
+                                feedback_detail["rolled_back_count"] = len(rolled_back_steps)
+                                print(
+                                    f"[VBF-Feedback] Checkpoint rollback to {rollback_step_id} "
+                                    f"(cleared {len(rolled_back_steps)} steps)"
+                                )
+                            else:
+                                print(
+                                    f"[VBF-Feedback] Rollback step {rollback_step_id} not found in current plan, "
+                                    "replanning without rollback index shift"
+                                )
+                        else:
+                            print(
+                                f"[VBF-Feedback] Rollback to {rollback_step_id} failed: "
+                                f"{rollback_resp.get('error', 'unknown')}"
+                            )
+
+                print(
+                    f"[VBF-Feedback] Triggering local replan at {step_id} "
+                    f"(reason={reason}, from_index={replan_from_idx})"
+                )
+                plan, new_steps = await self._replan_from_step(
+                    prompt=prompt,
+                    fail_idx=replan_from_idx,
+                    steps=steps,
+                    step_results=step_results,
+                    allowed_skills=allowed_skills,
+                    save_path=_save_path,
+                    feedback_detail=feedback_detail,
+                )
+                steps = steps[:replan_from_idx] + new_steps
+                i = replan_from_idx
+                print(f"[VBF-Feedback] Replan produced {len(new_steps)} steps ({len(steps)} total)")
+                continue
+
+            # Default advance for continue or unknown actions
+            i += 1
+
+        print(f"[VBF-Feedback] Task completed: {len(step_results)} steps")
+        return {"prompt": prompt, "step_results": step_results, "plan": plan}
+
+    async def _replan_from_step(
+        self,
+        prompt: str,
+        fail_idx: int,
+        steps: List[Dict],
+        step_results: Dict,
+        allowed_skills: List[str],
+        save_path: str,
+        feedback_detail: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict, List]:
+        """Generate a new local plan from failure/checkpoint boundary."""
+        import json
+
+        adapter = await self._ensure_adapter()
+        scene = await self.capture_scene_state()
+
+        failed_step = steps[fail_idx] if fail_idx < len(steps) else {}
+        failed_step_id = failed_step.get("step_id", "unknown")
+        failed_skill = failed_step.get("skill", "unknown")
+        failed_result = step_results.get(failed_step_id, {})
+
+        replan_prompt = f"""REPLAN FROM CURRENT SCENE STATE
+
+User goal (must be satisfied semantically):
+{prompt}
+
+Current scene state:
+{scene.to_prompt_text()}
+
+Current index: {fail_idx}
+Current step id: {failed_step_id}
+Current skill: {failed_skill}
+Current step result:
+{json.dumps(failed_result, indent=2, ensure_ascii=False)[:2000]}
+
+Feedback trigger details:
+{json.dumps(feedback_detail or {}, indent=2, ensure_ascii=False)[:2000]}
+
+Completed steps so far:
+{json.dumps(step_results, indent=2, ensure_ascii=False)[:3000]}
+
+Remaining old steps (for reference only):
+{json.dumps(steps[fail_idx + 1:], indent=2, ensure_ascii=False)[:1200]}
+
+Allowed skills:
+{json.dumps(allowed_skills[:200], ensure_ascii=False)}
+
+Instructions:
+1) Continue from the current scene state (do not restart from scratch).
+2) Ensure final output matches the user goal. Example failure to avoid: returning only a cube when goal is a smartphone.
+3) Prefer local corrective steps first, then continue normal modeling flow.
+4) Return valid plan JSON with a `steps` array.
+"""
+        messages = adapter.format_messages(replan_prompt)
+        raw_plan = await self._adapter_call(messages)
+        plan = normalize_plan(raw_plan)
+        new_steps = validate_plan_structure(plan)
+        return plan, new_steps
+
+    def _inject_scene_context(self, prompt: str, scene: SceneState) -> str:
+        """Inject scene state into planning prompt."""
+        return f"""Current Blender scene state:
+{scene.to_prompt_text()}
+
+--- USER REQUEST ---
+{prompt}
+
+Planning constraints:
+- The final model must satisfy the user request semantically, not just produce arbitrary primitives.
+- Generate coherent, connected modeling steps toward a complete result.
+"""

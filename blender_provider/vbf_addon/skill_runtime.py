@@ -42,6 +42,13 @@ def _apply_steps(root: Any, steps: List[Dict[str, Any]]) -> Any:
             cur = cur[idx]
             continue
 
+        if "len" in st:
+            flag = st["len"]
+            if flag is not True:
+                raise SkillRuntimeError(f"Invalid len token at {i}: {st}")
+            cur = len(cur)
+            continue
+
         raise SkillRuntimeError(f"Unknown path token at {i}: {st}")
 
     return cur
@@ -132,4 +139,3 @@ def py_call(
         return {"result": _serialize_best_effort(result)}
     except Exception as e:
         raise RuntimeError(f"py_call failed: {e}\n{traceback.format_exc()}")
-

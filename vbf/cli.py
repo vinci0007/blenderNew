@@ -44,6 +44,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="建模风格模板 (默认: hard_surface_realistic)",
     )
     p.add_argument("--list-styles", action="store_true", help="列出可用风格模板")
+    # Closed-loop feedback control
+    g = p.add_argument_group("闭环反馈控制")
+    g.add_argument(
+        "--no-feedback",
+        action="store_true",
+        help="禁用闭环反馈（使用原有的 run_task）",
+    )
+    g.add_argument(
+        "--no-auto-check",
+        action="store_true",
+        help="禁用每个 skill 后的自动验证",
+    )
+    g.add_argument(
+        "--no-llm-feedback",
+        action="store_true",
+        help="禁用 stage 边界的 LLM 深度分析",
+    )
     return p
 
 
@@ -55,15 +72,30 @@ async def _run(
     resume: str | None,
     save_state: str | None,
     style: str,
+    no_feedback: bool = False,
+    no_auto_check: bool = False,
+    no_llm_feedback: bool = False,
 ) -> int:
     client = VBFClient(host=host, port=port, blender_path=blender_path)
     try:
-        result = await client.run_task(
-            prompt=prompt,
-            resume_state_path=resume,
-            save_state_path=save_state,
-            style=style,
-        )
+        if no_feedback:
+            # Legacy mode: no closed-loop feedback
+            result = await client.run_task(
+                prompt=prompt,
+                resume_state_path=resume,
+                save_state_path=save_state,
+                style=style,
+            )
+        else:
+            # Closed-loop mode with feedback
+            result = await client.run_task_with_feedback(
+                prompt=prompt,
+                resume_state_path=resume,
+                save_state_path=save_state,
+                style=style,
+                enable_auto_check=not no_auto_check,
+                enable_llm_feedback=not no_llm_feedback,
+            )
         print(result)
         return 0
     except TaskInterruptedError as e:
@@ -92,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
             args.resume,
             args.save_state,
             args.style,
+            args.no_feedback,
+            args.no_auto_check,
+            args.no_llm_feedback,
         )
     )
 
