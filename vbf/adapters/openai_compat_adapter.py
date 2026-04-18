@@ -36,6 +36,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
     Progressive disclosure: Only metadata in prompt, full schema via
     load_skill() tool when LLM needs it.
     """
+    _COMPAT_MODE_CACHE: Dict[str, Dict[str, bool]] = {}
 
     def __init__(
         self,
@@ -75,6 +76,15 @@ class OpenAICompatAdapter(VBFModelAdapter):
             if isinstance(api_key_env, str):
                 api_key_env = [api_key_env]
             self.api_key = self._resolve_api_key(api_key_env)
+
+        # Runtime compatibility mode (provider-specific, cached in-process).
+        self._compat_mode_key = f"{self.base_url}|{self.default_model}"
+        default_allow_json = self.response_format.get("type") == "json_object"
+        default_allow_tools = bool(self.use_function_calling)
+        cached = self._COMPAT_MODE_CACHE.get(self._compat_mode_key, {})
+        self._allow_json_object = bool(cached.get("allow_json_object", default_allow_json))
+        self._allow_tools = bool(cached.get("allow_tools", default_allow_tools))
+        self._compat_mode_logged = False
 
     def _resolve_api_key(self, env_vars: List[str]) -> Optional[str]:
         """Get API key from environment variables."""
@@ -224,6 +234,8 @@ class OpenAICompatAdapter(VBFModelAdapter):
 4. **Parameters** - Required params must be provided; optional params use defaults
 5. **load_skill is NOT a Blender skill** - It is a documentation query tool only. Never use "load_skill" as the "skill" value in plan steps. Only use it via the function_calling tool to query skill documentation.
 6. **Parent-Child Constraint** - When creating accessories (buttons, holes, ports, camera lenses, etc.), use **set_parent** to attach them to the main body. Format: {{"child_name": {{"$ref": "step_xxx.data.object_name"}}, "parent_name": {{"$ref": "step_001.data.object_name"}}}}
+7. **No hardcoded object names in assembly** - For relationship skills like set_parent/constraints/material assignment, do not hardcode names like "CameraModule". Always reference names from prior step outputs via $ref.
+8. **Creation before reference** - Every referenced object must be created in an earlier step. If a child/parent object is not explicitly created earlier, add creation steps first.
 {tool_instruction}
 ## Available Skills ({len(skills_to_include)} total)
 {skills_text}
@@ -392,6 +404,73 @@ class OpenAICompatAdapter(VBFModelAdapter):
 
         return request
 
+    def _persist_compat_mode(self) -> None:
+        self._COMPAT_MODE_CACHE[self._compat_mode_key] = {
+            "allow_json_object": bool(self._allow_json_object),
+            "allow_tools": bool(self._allow_tools),
+        }
+
+    def _build_api_request_with_mode(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]],
+        allow_tools: bool,
+        allow_json_object: bool,
+    ) -> Dict[str, Any]:
+        effective_tools = tools if allow_tools else None
+        request = self.build_api_request(messages, tools=effective_tools)
+        if not allow_json_object:
+            request.pop("response_format", None)
+        return request
+
+    @staticmethod
+    def _should_retry_without_response_format(
+        error: Exception, request_body: Dict[str, Any]
+    ) -> bool:
+        """Detect providers that reject `response_format=json_object`."""
+        if "response_format" not in request_body:
+            return False
+        msg = f"{getattr(error, 'message', '')} {error}".lower()
+        return (
+            "response_format" in msg
+            and (
+                "json_object" in msg
+                or "json_schema" in msg
+                or "must be" in msg
+                or "invalid" in msg
+            )
+        )
+
+    @staticmethod
+    def _should_retry_without_tools(
+        error: Exception, request_body: Dict[str, Any]
+    ) -> bool:
+        """Detect providers that reject tools/function-calling payloads."""
+        if "tools" not in request_body and "tool_choice" not in request_body:
+            return False
+        msg = f"{getattr(error, 'message', '')} {error}".lower()
+        return (
+            "tool" in msg
+            and (
+                "unsupported" in msg
+                or "not support" in msg
+                or "invalid" in msg
+                or "unknown" in msg
+                or "must be" in msg
+            )
+        )
+
+    def _log_compat_mode_once(self) -> None:
+        if self._compat_mode_logged:
+            return
+        print(
+            "[VBF] LLM request mode: "
+            f"model={self.default_model}, "
+            f"tools={'on' if self._allow_tools else 'off'}, "
+            f"json_object={'on' if self._allow_json_object else 'off'}"
+        )
+        self._compat_mode_logged = True
+
     def format_messages(
         self,
         user_input: str,
@@ -526,63 +605,104 @@ class OpenAICompatAdapter(VBFModelAdapter):
 
         tools = self.build_tools_for_llm() if self.use_function_calling else None
         max_tool_calls = 10
+        self._log_compat_mode_once()
 
         def _sync_http_call(req_messages: List[Dict], req_tools: Optional[List[Dict]]) -> Any:
             """Synchronous HTTP call (runs in thread pool)."""
             client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-            request_body = self.build_api_request(req_messages, tools=req_tools)
-            try:
-                resp = client.chat.completions.create(**request_body)
-            except APITimeoutError as e:
-                raise TimeoutError("LLM call timed out") from e
-            except APIConnectionError as e:
-                raise ConnectionError(f"LLM connection failed: {e}") from e
-            except APIError as e:
-                raise RuntimeError(f"LLM API error ({e.status_code}): {e.message}") from e
+            allow_tools = bool(req_tools) and bool(self._allow_tools)
+            allow_json_object = bool(self._allow_json_object)
+            max_attempts = 4
 
-            choice = resp.choices[0]
-            finish_reason = choice.finish_reason
-            message = choice.message
+            for attempt in range(max_attempts):
+                request_body = self._build_api_request_with_mode(
+                    req_messages,
+                    req_tools,
+                    allow_tools=allow_tools,
+                    allow_json_object=allow_json_object,
+                )
 
-            # Handle function calling
-            if hasattr(message, "tool_calls") and message.tool_calls:
-                tool_results = []
-                for tc in message.tool_calls:
-                    tool_name = tc.function.name
-                    arguments = tc.function.arguments
-                    tool_call_id = tc.id
+                try:
+                    resp = client.chat.completions.create(**request_body)
+                except APITimeoutError as e:
+                    raise TimeoutError("LLM call timed out") from e
+                except APIConnectionError as e:
+                    raise ConnectionError(f"LLM connection failed: {e}") from e
+                except APIError as e:
+                    if self._should_retry_without_response_format(e, request_body) and allow_json_object:
+                        allow_json_object = False
+                        self._allow_json_object = False
+                        self._persist_compat_mode()
+                        print("[VBF] LLM compatibility fallback: disable response_format=json_object")
+                        continue
+                    if self._should_retry_without_tools(e, request_body) and allow_tools:
+                        allow_tools = False
+                        self._allow_tools = False
+                        self._persist_compat_mode()
+                        print("[VBF] LLM compatibility fallback: disable function-calling tools")
+                        continue
+                    raise RuntimeError(f"LLM API error ({e.status_code}): {e.message}") from e
 
-                    try:
-                        args = json.loads(arguments) if isinstance(arguments, str) else arguments
-                    except json.JSONDecodeError:
-                        args = {}
+                choice = resp.choices[0]
+                finish_reason = choice.finish_reason
+                message = choice.message
 
-                    # Execute tool (sync call, no RPC needed for skill metadata)
-                    if tool_name == "load_skill":
-                        result = self.load_skill(args.get("skill_name", ""))
-                    else:
-                        result = {"error": f"Unknown tool: {tool_name}"}
+                # Handle function calling
+                if hasattr(message, "tool_calls") and message.tool_calls:
+                    tool_results = []
+                    for tc in message.tool_calls:
+                        tool_name = tc.function.name
+                        arguments = tc.function.arguments
+                        tool_call_id = tc.id
 
-                    tool_results.append({
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "args": args,
-                        "result": result,
-                    })
+                        try:
+                            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+                        except json.JSONDecodeError:
+                            args = {}
 
-                return {
-                    "finish_reason": finish_reason,
-                    "tool_results": tool_results,
-                    "raw_message": message,
-                }
-            else:
+                        # Execute tool (sync call, no RPC needed for skill metadata)
+                        if tool_name == "load_skill":
+                            result = self.load_skill(args.get("skill_name", ""))
+                        else:
+                            result = {"error": f"Unknown tool: {tool_name}"}
+
+                        tool_results.append({
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "args": args,
+                            "result": result,
+                        })
+
+                    return {
+                        "finish_reason": finish_reason,
+                        "tool_results": tool_results,
+                        "raw_message": message,
+                    }
+
                 # No tool calls - final response
                 content = message.content
                 if content is None:
+                    # Some providers stop with empty content for larger prompt+tool payloads.
+                    if allow_tools:
+                        allow_tools = False
+                        self._allow_tools = False
+                        self._persist_compat_mode()
+                        print("[VBF] LLM compatibility fallback: empty content -> disable tools and retry")
+                        continue
+                    if allow_json_object:
+                        allow_json_object = False
+                        self._allow_json_object = False
+                        self._persist_compat_mode()
+                        print("[VBF] LLM compatibility fallback: empty content -> disable json_object and retry")
+                        continue
                     raise RuntimeError(
                         f"LLM returned empty content (finish_reason={finish_reason})"
                     )
+
+                # Successful plain content path.
                 return self.parse_response({self.response_content_path: content})
+
+            raise RuntimeError("LLM provider returned no usable content after compatibility fallbacks")
 
         # Tool call loop
         current_messages = list(messages)  # Copy to avoid mutating original

@@ -69,6 +69,8 @@ class VBFClient:
             auto_cleanup=True,
         )
         self._adapter = None  # LLM adapter (lazy init via _ensure_adapter)
+        self._capabilities_cache: Optional[Dict[str, Any]] = None
+        self._capabilities_logged = False
 
     # --- LLM adapter helpers (v2 - replaces llm_integration.py) ---
 
@@ -152,6 +154,7 @@ class VBFClient:
         while asyncio.get_event_loop().time() < deadline:
             try:
                 await self._ws.connect()
+                await self._probe_server_capabilities_once()
                 return
             except Exception as e:
                 last_err = e
@@ -161,6 +164,7 @@ class VBFClient:
         while asyncio.get_event_loop().time() < deadline2:
             try:
                 await self._ws.connect()
+                await self._probe_server_capabilities_once()
                 return
             except Exception as e:
                 last_err = e
@@ -191,8 +195,36 @@ class VBFClient:
         except Exception:
             return None
 
+    async def get_server_capabilities(self, refresh: bool = False) -> Dict[str, Any]:
+        """Get server capability descriptor (feature negotiation)."""
+        if self._capabilities_cache is not None and not refresh:
+            return {"ok": True, "data": self._capabilities_cache, "cached": True}
+
+        try:
+            resp = await self._ws.call(method="vbf.get_capabilities", params={})
+            if not isinstance(resp, dict):
+                return {"ok": False, "error": "Invalid capability response"}
+            data = resp.get("data")
+            if isinstance(data, dict):
+                self._capabilities_cache = data
+            return resp
+        except JsonRpcError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "method_not_found": e.code == -32601,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     async def get_scene_delta(self, since_seq: int = 0) -> Dict[str, Any]:
         """Get aggregated scene delta from depsgraph event stream."""
+        if self._feature_supported("scene_delta") is False:
+            return {
+                "ok": False,
+                "method_not_found": True,
+                "error": "Server capability reports scene_delta unsupported",
+            }
         try:
             resp = await self._ws.call(
                 method="vbf.get_scene_delta",
@@ -212,6 +244,12 @@ class VBFClient:
 
     async def get_scene_snapshot(self) -> Dict[str, Any]:
         """Get full lightweight scene snapshot for cache bootstrap/resync."""
+        if self._feature_supported("scene_snapshot") is False:
+            return {
+                "ok": False,
+                "method_not_found": True,
+                "error": "Server capability reports scene_snapshot unsupported",
+            }
         try:
             resp = await self._ws.call(
                 method="vbf.get_scene_snapshot",
@@ -229,6 +267,52 @@ class VBFClient:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _feature_supported(self, feature_name: str) -> Optional[bool]:
+        if not isinstance(self._capabilities_cache, dict):
+            return None
+        features = self._capabilities_cache.get("features")
+        if not isinstance(features, dict):
+            return None
+        flag = features.get(feature_name)
+        if isinstance(flag, bool):
+            return flag
+        return None
+
+    async def _probe_server_capabilities_once(self) -> None:
+        """Best-effort probe; never fail connection flow if unsupported."""
+        if self._capabilities_logged:
+            return
+        try:
+            resp = await self.get_server_capabilities(refresh=True)
+            if resp.get("ok") and isinstance(resp.get("data"), dict):
+                self._log_capabilities(resp["data"])
+            elif resp.get("method_not_found"):
+                print("[VBF] Server capabilities RPC unavailable; using compatibility fallback mode")
+                self._capabilities_logged = True
+        except Exception:
+            pass
+
+    def _log_capabilities(self, caps: Dict[str, Any]) -> None:
+        """Emit a concise capabilities summary once per client session."""
+        if self._capabilities_logged:
+            return
+        features = caps.get("features", {}) if isinstance(caps, dict) else {}
+        if not isinstance(features, dict):
+            features = {}
+
+        def _flag(name: str) -> str:
+            value = features.get(name)
+            return "on" if value is True else "off" if value is False else "unknown"
+
+        print(
+            "[VBF] Server capabilities: "
+            f"snapshot={_flag('scene_snapshot')}, "
+            f"delta={_flag('scene_delta')}, "
+            f"rollback={_flag('rollback_to_step')}, "
+            f"cap_rpc={_flag('capabilities_rpc')}"
+        )
+        self._capabilities_logged = True
+
     async def rollback_to_step(self, step_id: str) -> Dict[str, Any]:
         try:
             return await self._ws.call(method="vbf.rollback_to_step", params={"step_id": step_id})
@@ -237,13 +321,7 @@ class VBFClient:
             return {"ok": False, "error": str(e)}
 
     async def capture_scene_state(self) -> SceneState:
-        """Capture current Blender scene state via py_get calls.
-
-        py_get skill takes path_steps: List[Dict] where each dict is one step:
-          - {"attr": "name"}  -> getattr(cur, "name")
-          - {"key": "..."}    -> cur["..."]
-          - {"index": N}      -> cur[N]
-        """
+        """Capture current Blender scene state with snapshot-first fallback."""
         state = SceneState()
 
         async def _get_value(path_steps: list):
@@ -253,30 +331,147 @@ class VBFClient:
                 return resp.get("data", {}).get("value")
             return None
 
-        try:
-            # Get scene attributes individually (scene object serializes partially)
-            state.scene_name = await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "name"}]) or "Scene"
-            state.frame_current = await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_current"}]) or 1
-            state.frame_start = await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_start"}]) or 1
-            state.frame_end = await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_end"}]) or 250
+        def _vec3(value: Any, default: Optional[List[float]] = None) -> List[float]:
+            fallback = default or [0.0, 0.0, 0.0]
+            if not isinstance(value, list) or len(value) < 3:
+                return list(fallback)
+            out: List[float] = []
+            for idx in range(3):
+                try:
+                    out.append(float(value[idx]))
+                except Exception:
+                    out.append(float(fallback[idx]))
+            return out
 
-            # List objects and get their properties
-            objects_resp = await self.execute_skill("data_collections_list", {"collection": "objects"})
-            if objects_resp.get("ok"):
-                for obj_name in objects_resp.get("data", []):
-                    try:
-                        # Get object via bpy.data.objects["name"]
-                        obj_type = await _get_value([{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "type"}])
-                        obj_loc = await _get_value([{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "location"}])
-                        obj_dim = await _get_value([{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "dimensions"}])
+        def _to_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        async def _capture_scene_meta() -> None:
+            # Query scene attrs individually; this is stable across Blender versions.
+            state.scene_name = (
+                await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "name"}])
+                or "Scene"
+            )
+            state.frame_current = _to_int(
+                await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_current"}]),
+                1,
+            )
+            state.frame_start = _to_int(
+                await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_start"}]),
+                1,
+            )
+            state.frame_end = _to_int(
+                await _get_value([{"attr": "context"}, {"attr": "scene"}, {"attr": "frame_end"}]),
+                250,
+            )
+
+        try:
+            # Fast path for closed-loop flow: use depsgraph-backed scene snapshot.
+            snapshot_resp = await self.get_scene_snapshot()
+            if snapshot_resp.get("ok"):
+                data = snapshot_resp.get("data", {}) or {}
+                objects = data.get("objects")
+                if isinstance(objects, dict):
+                    await _capture_scene_meta()
+                    for obj_name, obj_state in objects.items():
+                        if not isinstance(obj_name, str) or not isinstance(obj_state, dict):
+                            continue
                         state.add_object(
                             name=obj_name,
-                            obj_type=str(obj_type) if obj_type else "MESH",
-                            location=list(obj_loc) if obj_loc else [0, 0, 0],
-                            size=list(obj_dim) if obj_dim else [0, 0, 0],
+                            obj_type=str(obj_state.get("type", "UNKNOWN")),
+                            location=_vec3(obj_state.get("location")),
+                            size=_vec3(obj_state.get("dimensions")),
+                            vertices=_to_int(obj_state.get("vertices"), 0),
+                            polygons=_to_int(obj_state.get("polygons"), 0),
+                            edges=_to_int(obj_state.get("edges"), 0),
+                            materials=_to_int(obj_state.get("materials"), 0),
                         )
-                    except Exception:
-                        pass
+                    state.set_statistics(
+                        object_count=len(state.get_objects()),
+                        capture_source="scene_snapshot",
+                        snapshot_seq=_to_int(data.get("seq"), 0),
+                    )
+                    state.finalize()
+                    return state
+            elif not snapshot_resp.get("method_not_found"):
+                state.add_warning(
+                    f"Scene snapshot unavailable ({snapshot_resp.get('error', 'unknown')}); fallback to py_get"
+                )
+        except Exception as e:
+            # Keep capture resilient: snapshot issues should not block fallback capture.
+            state.add_warning(f"Scene snapshot failed: {e}")
+
+        try:
+            await _capture_scene_meta()
+
+            object_names: List[str] = []
+
+            # Preferred fallback path: bpy.data.objects.keys() via py_call.
+            names_resp = await self.execute_skill(
+                "py_call",
+                {
+                    "callable_path_steps": [{"attr": "data"}, {"attr": "objects"}, {"attr": "keys"}],
+                    "args": [],
+                    "kwargs": {},
+                },
+            )
+            if names_resp.get("ok"):
+                names_data = names_resp.get("data", {}) or {}
+                maybe_names = names_data.get("result")
+                if isinstance(maybe_names, list):
+                    object_names = [name for name in maybe_names if isinstance(name, str) and name]
+
+            # Legacy fallback: iterate object collection by index if keys() path fails.
+            if not object_names:
+                count = _to_int(
+                    await _get_value([{"attr": "data"}, {"attr": "objects"}, {"len": True}]),
+                    0,
+                )
+                for idx in range(max(count, 0)):
+                    obj_name = await _get_value(
+                        [{"attr": "data"}, {"attr": "objects"}, {"index": idx}, {"attr": "name"}]
+                    )
+                    if isinstance(obj_name, str) and obj_name:
+                        object_names.append(obj_name)
+
+            # Deduplicate while preserving order.
+            seen = set()
+            unique_names: List[str] = []
+            for obj_name in object_names:
+                if obj_name in seen:
+                    continue
+                seen.add(obj_name)
+                unique_names.append(obj_name)
+
+            for obj_name in unique_names:
+                try:
+                    obj_type = await _get_value(
+                        [{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "type"}]
+                    )
+                    obj_loc = await _get_value(
+                        [{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "location"}]
+                    )
+                    obj_dim = await _get_value(
+                        [{"attr": "data"}, {"attr": "objects"}, {"key": obj_name}, {"attr": "dimensions"}]
+                    )
+                    state.add_object(
+                        name=obj_name,
+                        obj_type=str(obj_type) if obj_type else "MESH",
+                        location=_vec3(obj_loc),
+                        size=_vec3(obj_dim),
+                    )
+                except Exception:
+                    # Best-effort: keep other objects even if one fails.
+                    continue
+
+            state.set_statistics(
+                object_count=len(state.get_objects()),
+                capture_source="py_get_fallback",
+            )
+            state.finalize()
         except Exception as e:
             state.add_error(f"Failed to capture scene: {e}")
         return state
@@ -575,8 +770,31 @@ Consider the current scene state when planning.
             adapter = await self._ensure_adapter()
             messages = adapter.format_messages(prompt)
             raw_plan = await self._adapter_call(messages)
-            plan = normalize_plan(raw_plan)
-            steps = validate_plan_structure(plan)
+
+            # First pass normalization.
+            try:
+                plan = normalize_plan(raw_plan)
+                steps = validate_plan_structure(plan)
+            except ValueError as e:
+                # Common model failure: returns only planning-time pseudo tool steps
+                # (e.g., load_skill). Retry once with explicit executable-only constraint.
+                if "no executable steps" not in str(e).lower():
+                    raise
+                repair_prompt = (
+                    f"{prompt}\n\n"
+                    "IMPORTANT:\n"
+                    "- Return ONLY executable Blender skills in steps[].\n"
+                    "- Do NOT use load_skill as a step skill.\n"
+                    "- Every step must have a valid skill name and args object.\n"
+                    "- Ensure at least one executable step is present.\n"
+                    "- For set_parent and other relationship steps, NEVER hardcode object names; use $ref from previous creation step results.\n"
+                    "- If an object is referenced, it must be created in an earlier step."
+                )
+                repair_messages = adapter.format_messages(repair_prompt)
+                repaired_raw_plan = await self._adapter_call(repair_messages)
+                plan = normalize_plan(repaired_raw_plan)
+                steps = validate_plan_structure(plan)
+
             return plan, steps
         except ValueError as e:
             if "not configured" in str(e):
@@ -814,6 +1032,8 @@ Instructions:
 2) Ensure final output matches the user goal. Example failure to avoid: returning only a cube when goal is a smartphone.
 3) Prefer local corrective steps first, then continue normal modeling flow.
 4) Return valid plan JSON with a `steps` array.
+5) For relationship steps (set_parent/constraints/material assignment), NEVER hardcode object names (e.g. "CameraModule"). Use `$ref` to previous step outputs.
+6) If an object is referenced, ensure it is explicitly created earlier in the same plan.
 """
         messages = adapter.format_messages(replan_prompt)
         raw_plan = await self._adapter_call(messages)

@@ -7,14 +7,20 @@ to match the expected VBF plan schema, including:
 - on_success structure completion
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 
 # Parameter alias mapping for common LLM naming conventions
 PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
     "create_primitive": {
         "type": "primitive_type",  # LLM commonly uses 'type', actual is 'primitive_type'
+        "rotation": "rotation_euler",  # Blender primitive helper expects rotation_euler
     },
+}
+
+# Skills/tools that are for planning-time documentation query, not Blender execution.
+NON_EXECUTION_SKILLS: Set[str] = {
+    "load_skill",
 }
 
 
@@ -58,8 +64,12 @@ def apply_parameter_aliases(skill_name: str, args: Dict[str, Any]) -> None:
     if skill_name in PARAMETER_ALIASES:
         aliases = PARAMETER_ALIASES[skill_name]
         for alias, canonical in aliases.items():
-            if alias in args and canonical not in args:
-                args[canonical] = args.pop(alias)
+            if alias in args:
+                alias_value = args.pop(alias)
+                # Prefer canonical key when both are present; still remove alias to
+                # avoid passing unsupported kwargs to Blender skill functions.
+                if canonical not in args:
+                    args[canonical] = alias_value
 
 
 def ensure_on_success_structure(on_success: Dict[str, Any]) -> None:
@@ -106,6 +116,7 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Plan 'steps' must be a list")
 
     # 3. Normalize each step
+    normalized_steps: List[Dict[str, Any]] = []
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -122,6 +133,17 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         on_success = step.get("on_success")
         if isinstance(on_success, dict):
             ensure_on_success_structure(on_success)
+
+        # Drop planning-time pseudo tools that cannot be executed as Blender skills.
+        skill_name = step.get("skill")
+        if isinstance(skill_name, str) and skill_name in NON_EXECUTION_SKILLS:
+            continue
+
+        normalized_steps.append(step)
+
+    plan["steps"] = normalized_steps
+    if not normalized_steps:
+        raise ValueError("Plan has no executable steps after normalization")
 
     return plan
 

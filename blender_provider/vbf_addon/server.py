@@ -5,6 +5,7 @@ import copy
 import inspect
 import json
 import queue
+import socket
 import threading
 import time
 import traceback
@@ -266,6 +267,16 @@ class VBFWebSocketServer:
                         "jsonrpc": "2.0",
                         "id": req_id,
                         "result": {"ok": True, "data": {"skills": schemas}},
+                    }
+                    await websocket.send(json.dumps(resp))
+                    continue
+
+                if method == "vbf.get_capabilities":
+                    data = self._get_capabilities()
+                    resp = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"ok": True, "data": data},
                     }
                     await websocket.send(json.dumps(resp))
                     continue
@@ -634,7 +645,66 @@ class VBFWebSocketServer:
                 "objects": copy.deepcopy(self._scene_state),
             }
 
+    def _get_capabilities(self) -> Dict[str, Any]:
+        """Return server RPC capabilities for client-side feature negotiation."""
+        return {
+            "server": "vbf_addon",
+            "rpc_version": "1.0",
+            "addon_version": "0.1.0",
+            "features": {
+                "capabilities_rpc": True,
+                "list_skills": True,
+                "describe_skills": True,
+                "execute_skill": True,
+                "rollback_to_step": True,
+                "scene_delta": True,
+                "scene_snapshot": True,
+                "closed_loop_events": True,
+            },
+            "limits": {
+                "scene_events_max": int(self._scene_events_max),
+                "delta_flush_interval_ms": int(self._delta_flush_interval_s * 1000),
+            },
+            "runtime": {
+                "depsgraph_handlers_registered": bool(self._depsgraph_pre_handler and self._depsgraph_post_handler),
+            },
+            "methods": [
+                "vbf.list_skills",
+                "vbf.describe_skills",
+                "vbf.get_capabilities",
+                "vbf.get_scene_delta",
+                "vbf.get_scene_snapshot",
+                "vbf.rollback_to_step",
+                "vbf.execute_skill",
+            ],
+        }
+
 _SERVER: Optional[VBFWebSocketServer] = None
+_LAST_SELF_CHECK: Optional[Dict[str, Any]] = None
+
+def _read_bind_from_preferences(default_host: str, default_port: int) -> tuple[str, int]:
+    """Read bind host/port from addon preferences with safe defaults."""
+    host = default_host
+    port = default_port
+    try:
+        addon_key = __package__ or "vbf_addon"
+        addon_entry = bpy.context.preferences.addons.get(addon_key)
+        if addon_entry and getattr(addon_entry, "preferences", None):
+            prefs = addon_entry.preferences
+            host = getattr(prefs, "host", host) or host
+            port = int(getattr(prefs, "port", port) or port)
+    except Exception:
+        pass
+    return host, port
+
+def _sync_server_bind_from_preferences(server: VBFWebSocketServer) -> bool:
+    """Sync existing server object's bind fields from UI preferences."""
+    host, port = _read_bind_from_preferences(server.host, server.port)
+    changed = (server.host != host) or (int(server.port) != int(port))
+    if changed:
+        server.host = host
+        server.port = int(port)
+    return changed
 
 def get_server() -> VBFWebSocketServer:
     global _SERVER
@@ -649,16 +719,85 @@ def get_server() -> VBFWebSocketServer:
             pass
 
         # Prefer addon preferences if available (UI configurable).
-        try:
-            addon_key = __package__ or "vbf_addon"
-            prefs = bpy.context.preferences.addons[addon_key].preferences
-            host = getattr(prefs, "host", host) or host
-            port = int(getattr(prefs, "port", port) or port)
-        except Exception:
-            pass
+        host, port = _read_bind_from_preferences(host, port)
 
         _SERVER = VBFWebSocketServer(host=host, port=port)
     return _SERVER
+
+def _normalize_probe_host(host: str) -> str:
+    """Normalize bind host to a loopback address suitable for local probing."""
+    if not host:
+        return "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+def _tcp_probe(host: str, port: int, timeout_s: float = 1.0) -> tuple[bool, str]:
+    probe_host = _normalize_probe_host(host)
+    try:
+        with socket.create_connection((probe_host, int(port)), timeout=timeout_s):
+            return True, f"TCP reachable at {probe_host}:{port}"
+    except Exception as e:
+        return False, f"TCP probe failed at {probe_host}:{port}: {e}"
+
+def run_self_check() -> Dict[str, Any]:
+    """Run one-click runtime self-check for addon status and local connectivity."""
+    global _LAST_SELF_CHECK
+
+    server = get_server()
+    checks: List[Dict[str, Any]] = []
+
+    checks.append({
+        "name": "server_running",
+        "ok": bool(server.running),
+        "message": "Server is running" if server.running else "Server is not running",
+    })
+
+    tcp_ok, tcp_message = _tcp_probe(server.host, server.port)
+    checks.append({
+        "name": "tcp_reachable",
+        "ok": bool(tcp_ok),
+        "message": tcp_message,
+    })
+
+    skill_count = len(SKILL_REGISTRY)
+    checks.append({
+        "name": "skill_registry_loaded",
+        "ok": skill_count > 0,
+        "message": f"Skill registry size: {skill_count}",
+    })
+
+    capabilities: Dict[str, Any] = {}
+    try:
+        capabilities = server._get_capabilities() if hasattr(server, "_get_capabilities") else {}
+    except Exception:
+        capabilities = {}
+    features = capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    caps_ok = isinstance(features, dict) and bool(features)
+    checks.append({
+        "name": "capabilities_available",
+        "ok": caps_ok,
+        "message": "Capabilities metadata available" if caps_ok else "Capabilities metadata unavailable",
+    })
+
+    all_ok = all(check.get("ok") for check in checks)
+    summary = (
+        f"running={'yes' if server.running else 'no'}, "
+        f"tcp={'yes' if tcp_ok else 'no'}, "
+        f"skills={skill_count}"
+    )
+    result = {
+        "ok": all_ok,
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "bind": f"{server.host}:{server.port}",
+        "summary": summary,
+        "checks": checks,
+    }
+    _LAST_SELF_CHECK = result
+    return result
+
+def get_last_self_check() -> Optional[Dict[str, Any]]:
+    return _LAST_SELF_CHECK
 
 class VBF_OT_serve(bpy.types.Operator):
     bl_idname = "vbf.serve"
@@ -668,8 +807,16 @@ class VBF_OT_serve(bpy.types.Operator):
 
     def execute(self, context):
         server = get_server()
+        bind_changed = _sync_server_bind_from_preferences(server)
+
+        # If bind changed while running, restart server so new address takes effect.
+        if bind_changed and server.running:
+            server.stop()
+
         if not server.running:
             server.start()
+            if bind_changed:
+                self.report({"INFO"}, f"VBF bind updated to {server.host}:{server.port}")
 
         wm = getattr(context, "window_manager", None)
         if wm:
@@ -701,6 +848,7 @@ def _headless_poll():
 
 def start_vbf_ws_server() -> None:
     server = get_server()
+    _sync_server_bind_from_preferences(server)
     if not server.running:
         server.start()
     bpy.app.timers.register(_headless_poll, first_interval=0.1)
@@ -714,4 +862,17 @@ class VBF_OT_stop(bpy.types.Operator):
             get_server().stop()
         except Exception:
             pass
+        return {"FINISHED"}
+
+class VBF_OT_self_check(bpy.types.Operator):
+    bl_idname = "vbf.self_check"
+    bl_label = "VBF Self Check"
+    bl_description = "Run one-click connectivity and runtime self-check"
+
+    def execute(self, context):
+        result = run_self_check()
+        if result.get("ok"):
+            self.report({"INFO"}, f"[VBF] Self-check OK: {result.get('summary', '')}")
+        else:
+            self.report({"WARNING"}, f"[VBF] Self-check FAILED: {result.get('summary', '')}")
         return {"FINISHED"}

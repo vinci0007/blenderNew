@@ -72,17 +72,23 @@ class TestApplyParameterAliases:
         apply_parameter_aliases("create_primitive", args)
         assert args == {"primitive_type": "cube", "name": "test"}
 
+    def test_create_primitive_rotation_alias(self):
+        """Should rename 'rotation' to 'rotation_euler' for create_primitive."""
+        args = {"rotation": [0.0, 0.0, 1.57], "name": "test"}
+        apply_parameter_aliases("create_primitive", args)
+        assert args == {"rotation_euler": [0.0, 0.0, 1.57], "name": "test"}
+
     def test_no_alias_for_unknown_skill(self):
         """Should not modify args for unknown skills."""
         args = {"type": "cube"}
         apply_parameter_aliases("unknown_skill", args)
         assert args == {"type": "cube"}
 
-    def test_preserve_canonical_if_exists(self):
-        """Should not rename alias if canonical already exists."""
+    def test_drop_alias_if_canonical_exists(self):
+        """Should drop alias key when canonical key already exists."""
         args = {"type": "cube", "primitive_type": "sphere"}
         apply_parameter_aliases("create_primitive", args)
-        assert args == {"type": "cube", "primitive_type": "sphere"}
+        assert args == {"primitive_type": "sphere"}
 
 
 class TestEnsureOnSuccessStructure:
@@ -142,6 +148,30 @@ class TestNormalizePlan:
         """Should reject steps that are not a list."""
         with pytest.raises(ValueError, match="'steps' must be a list"):
             normalize_plan({"steps": "not a list"})
+
+    def test_filter_non_execution_load_skill_steps(self):
+        """Should remove planning-only tool steps like load_skill."""
+        raw_plan = {
+            "steps": [
+                {"step_id": "s0", "stage": "skill_discovery", "skill": "load_skill", "args": {"skill_name": "create_primitive"}},
+                {"step_id": "s1", "stage": "primitive_blocking", "skill": "create_primitive", "args": {"type": "cube"}},
+            ]
+        }
+        result = normalize_plan(raw_plan)
+        assert len(result["steps"]) == 1
+        assert result["steps"][0]["skill"] == "create_primitive"
+        assert result["steps"][0]["args"]["primitive_type"] == "cube"
+
+    def test_reject_when_all_steps_filtered_out(self):
+        """Should reject plans that only contain non-executable pseudo steps."""
+        with pytest.raises(ValueError, match="no executable steps"):
+            normalize_plan(
+                {
+                    "steps": [
+                        {"step_id": "s0", "skill": "load_skill", "args": {"skill_name": "create_primitive"}},
+                    ]
+                }
+            )
 
 
 class TestValidatePlanStructure:

@@ -59,3 +59,5 @@ vbf/config/last_gen_fail.txt
 /vbf/agent/memory/test-prefs
 /vbf/agent/memory/test-history-f4ed6512
 /vbf/agent/memory
+/codex_memory
+vbf/config/prompt_test.md

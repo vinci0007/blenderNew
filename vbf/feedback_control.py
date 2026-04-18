@@ -21,6 +21,7 @@ from .geometry_capture import (
 )
 from .feedback_rules import ValidationRuleRegistry
 from .vibe_protocol import resolve_refs
+from .jsonrpc_ws import JsonRpcError
 
 
 @dataclass
@@ -174,7 +175,24 @@ class ClosedLoopControl:
         )
 
         # Execute skill
-        result = await self.client.execute_skill(skill, resolved_args, step_id)
+        try:
+            result = await self.client.execute_skill(skill, resolved_args, step_id)
+        except JsonRpcError as e:
+            validation = ValidationResult.failed(skill, f"Execution failed: {e}")
+            self._failed_steps.append((step_id, validation))
+            step_results[step_id] = {"ok": False, "error": {"message": str(e)}}
+            if self.enable_auto_check:
+                return FeedbackDecision(
+                    action="replan",
+                    detail={"step_id": step_id, "error": str(e), "reason": "execute_skill_failed"},
+                    validation=validation,
+                ), None
+            return FeedbackDecision(
+                action="continue",
+                detail={"step_id": step_id, "error": str(e), "reason": "execute_skill_failed"},
+                validation=validation,
+            ), None
+
         step_results[step_id] = result
 
         # Check for execution error

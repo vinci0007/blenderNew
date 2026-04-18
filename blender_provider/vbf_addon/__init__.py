@@ -9,19 +9,91 @@ bl_info = {
 }
 
 import bpy  # type: ignore
+import importlib
+import os
+import sys
 
-try:
-    from .prefs import VBFAddonPreferences
-    from .server import VBF_OT_serve, VBF_OT_stop, start_vbf_ws_server  # type: ignore
-    from .ui import VBF_PT_main
-except Exception:
-    # Fallback for script-style loading without package context.
-    from prefs import VBFAddonPreferences  # type: ignore
-    from server import VBF_OT_serve, VBF_OT_stop, start_vbf_ws_server  # type: ignore
-    from ui import VBF_PT_main  # type: ignore
+def _load_symbols():
+    """Load addon modules across package/script execution contexts."""
+    errors = []
+
+    # 1) Preferred: relative imports from current package.
+    if __package__:
+        try:
+            prefs_mod = importlib.import_module(".prefs", package=__package__)
+            server_mod = importlib.import_module(".server", package=__package__)
+            ui_mod = importlib.import_module(".ui", package=__package__)
+            return (
+                prefs_mod.VBFAddonPreferences,
+                server_mod.VBF_OT_serve,
+                server_mod.VBF_OT_stop,
+                server_mod.VBF_OT_self_check,
+                server_mod.start_vbf_ws_server,
+                ui_mod.VBF_PT_main,
+            )
+        except Exception as e:
+            errors.append(f"relative import failed: {e}")
+
+    # 2) Explicit package-name attempts.
+    package_candidates = []
+    base = (__name__ or "").split(".", 1)[0]
+    if base and base not in {"__main__", "__init__"}:
+        package_candidates.append(base)
+    package_candidates.extend(["vbf_addon", "blender_provider.vbf_addon"])
+
+    seen = set()
+    for pkg in package_candidates:
+        if pkg in seen:
+            continue
+        seen.add(pkg)
+        try:
+            prefs_mod = importlib.import_module(f"{pkg}.prefs")
+            server_mod = importlib.import_module(f"{pkg}.server")
+            ui_mod = importlib.import_module(f"{pkg}.ui")
+            return (
+                prefs_mod.VBFAddonPreferences,
+                server_mod.VBF_OT_serve,
+                server_mod.VBF_OT_stop,
+                server_mod.VBF_OT_self_check,
+                server_mod.start_vbf_ws_server,
+                ui_mod.VBF_PT_main,
+            )
+        except Exception as e:
+            errors.append(f"{pkg} import failed: {e}")
+
+    # 3) Script-style fallback: ensure addon directory is importable.
+    try:
+        this_dir = os.path.dirname(__file__)
+        if this_dir and this_dir not in sys.path:
+            sys.path.insert(0, this_dir)
+        prefs_mod = importlib.import_module("prefs")
+        server_mod = importlib.import_module("server")
+        ui_mod = importlib.import_module("ui")
+        return (
+            prefs_mod.VBFAddonPreferences,
+            server_mod.VBF_OT_serve,
+            server_mod.VBF_OT_stop,
+            server_mod.VBF_OT_self_check,
+            server_mod.start_vbf_ws_server,
+            ui_mod.VBF_PT_main,
+        )
+    except Exception as e:
+        errors.append(f"script import failed: {e}")
+
+    raise ImportError("Failed to load VBF addon modules: " + " | ".join(errors))
 
 
-classes = [VBFAddonPreferences, VBF_OT_serve, VBF_OT_stop, VBF_PT_main]
+(
+    VBFAddonPreferences,
+    VBF_OT_serve,
+    VBF_OT_stop,
+    VBF_OT_self_check,
+    start_vbf_ws_server,
+    VBF_PT_main,
+) = _load_symbols()
+
+
+classes = [VBFAddonPreferences, VBF_OT_serve, VBF_OT_stop, VBF_OT_self_check, VBF_PT_main]
 
 
 def _addon_key() -> str:
