@@ -34,6 +34,32 @@ class TestExtractSkillsPlan:
         result = extract_skills_plan({})
         assert result == {}
 
+    def test_extract_nested_plan_wrapper(self):
+        """Should extract nested wrappers like data.plan.steps."""
+        wrapped = {"data": {"plan": {"steps": [{"step_id": "001", "skill": "x", "args": {}}]}}}
+        result = extract_skills_plan(wrapped)
+        assert "steps" in result
+        assert result["steps"][0]["step_id"] == "001"
+
+    def test_extract_list_as_steps(self):
+        """Should wrap list payload into {'steps': [...]}."""
+        wrapped = [{"step_id": "001", "skill": "x", "args": {}}]
+        result = extract_skills_plan(wrapped)
+        assert isinstance(result, dict)
+        assert result["steps"][0]["skill"] == "x"
+
+    def test_extract_from_arbitrary_nested_keys(self):
+        """Should find steps even when wrapped in unknown key names."""
+        wrapped = {"foo": {"bar": {"payload": {"steps": [{"step_id": "001", "skill": "x", "args": {}}]}}}}
+        result = extract_skills_plan(wrapped)
+        assert result["steps"][0]["step_id"] == "001"
+
+    def test_do_not_treat_non_step_list_as_steps(self):
+        """Should not mis-detect generic dict arrays as executable steps."""
+        wrapped = {"response": {"output": [{"type": "message", "content": "hello"}]}}
+        result = extract_skills_plan(wrapped)
+        assert result == wrapped
+
 
 class TestNormalizeStepFieldNames:
     """Tests for normalize_step_field_names function."""

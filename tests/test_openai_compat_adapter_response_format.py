@@ -1,4 +1,7 @@
 from vbf.adapters.openai_compat_adapter import OpenAICompatAdapter
+import sys
+import types
+import pytest
 
 
 class _Err:
@@ -142,3 +145,130 @@ def test_build_system_prompt_includes_schema_cards_when_tools_off():
     prompt = adapter.build_system_prompt(skills_subset=["create_primitive", "set_parent"])
     assert "Schema Cards (Tools-Off Fallback)" in prompt
     assert "create_primitive | required:" in prompt
+
+
+@pytest.mark.asyncio
+async def test_call_llm_accepts_plain_string_gateway_response(monkeypatch):
+    class _FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            class _Completions:
+                @staticmethod
+                def create(**kwargs):
+                    return (
+                        '{"steps":[{"step_id":"001","skill":"create_primitive",'
+                        '"args":{"primitive_type":"cube"}}]}'
+                    )
+
+            class _Chat:
+                completions = _Completions()
+
+            self.chat = _Chat()
+
+    fake_openai = types.SimpleNamespace(
+        OpenAI=_FakeOpenAI,
+        APITimeoutError=Exception,
+        APIConnectionError=Exception,
+        APIError=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    adapter = OpenAICompatAdapter(
+        model_name="default",
+        model_config={
+            "base_url": "http://127.0.0.1:12347/v1",
+            "default_model": "dummy-model",
+            "response_format": {"type": "json_object"},
+            "use_function_calling": False,
+        },
+        client=None,
+    )
+
+    parsed = await adapter.call_llm([{"role": "user", "content": "make cube"}])
+    assert parsed["steps"][0]["skill"] == "create_primitive"
+
+
+@pytest.mark.asyncio
+async def test_call_llm_accepts_stringified_completion_payload(monkeypatch):
+    class _FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            class _Completions:
+                @staticmethod
+                def create(**kwargs):
+                    return (
+                        '{"choices":[{"message":{"content":"{\\"steps\\":[{\\"step_id\\":\\"001\\",'
+                        '\\"skill\\":\\"create_primitive\\",\\"args\\":{\\"primitive_type\\":\\"cube\\"}}]}"}}]}'
+                    )
+
+            class _Chat:
+                completions = _Completions()
+
+            self.chat = _Chat()
+
+    fake_openai = types.SimpleNamespace(
+        OpenAI=_FakeOpenAI,
+        APITimeoutError=Exception,
+        APIConnectionError=Exception,
+        APIError=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    adapter = OpenAICompatAdapter(
+        model_name="default",
+        model_config={
+            "base_url": "http://127.0.0.1:12347/v1",
+            "default_model": "dummy-model",
+            "response_format": {"type": "json_object"},
+            "use_function_calling": False,
+        },
+        client=None,
+    )
+
+    parsed = await adapter.call_llm([{"role": "user", "content": "make cube"}])
+    assert parsed["steps"][0]["skill"] == "create_primitive"
+
+
+@pytest.mark.asyncio
+async def test_call_llm_fallback_on_empty_chunk_payload(monkeypatch):
+    class _FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            class _Completions:
+                @staticmethod
+                def create(**kwargs):
+                    # Simulate gateway returning empty chunk when tools/json enabled.
+                    if "tools" in kwargs or "response_format" in kwargs:
+                        return {
+                            "id": "",
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                        }
+                    return (
+                        '{"steps":[{"step_id":"001","skill":"create_primitive",'
+                        '"args":{"primitive_type":"cube"}}]}'
+                    )
+
+            class _Chat:
+                completions = _Completions()
+
+            self.chat = _Chat()
+
+    fake_openai = types.SimpleNamespace(
+        OpenAI=_FakeOpenAI,
+        APITimeoutError=Exception,
+        APIConnectionError=Exception,
+        APIError=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    adapter = OpenAICompatAdapter(
+        model_name="default",
+        model_config={
+            "base_url": "http://127.0.0.1:12347/v1",
+            "default_model": "dummy-model",
+            "response_format": {"type": "json_object"},
+            "use_function_calling": True,
+        },
+        client=None,
+    )
+
+    parsed = await adapter.call_llm([{"role": "user", "content": "make cube"}])
+    assert parsed["steps"][0]["skill"] == "create_primitive"

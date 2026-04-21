@@ -64,3 +64,7 @@ vbf/config/last_plan_fail.txt
 vbf/config/prompt_test.md
 tests/test_openai_compat_adapter_response_format.py
 tests/test_client_plan_retry.py
+assets/prompt_test copy.md
+tests/test_client_plan_retry.py
+tests/test_openai_compat_adapter_response_format.py
+tests/test_plan_normalization.py
