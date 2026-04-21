@@ -171,6 +171,26 @@ class VBFClient:
             # Parse-failure logging must not crash the main control flow.
             pass
 
+    def _record_plan_shape_failure(
+        self,
+        error_message: str,
+        raw_plan: Any,
+        stage: str = "normalize_plan",
+    ) -> None:
+        """Persist non-parse plan failures (e.g. missing steps wrappers)."""
+        try:
+            save_path = os.path.join(os.path.dirname(__file__), "config", "last_plan_fail.txt")
+            payload = {
+                "error": error_message,
+                "stage": stage,
+                "raw_plan_type": type(raw_plan).__name__,
+                "raw_plan": raw_plan,
+            }
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        except Exception:
+            pass
+
     @staticmethod
     def _is_llm_parse_error(exc: Exception) -> bool:
         return "LLM parse error" in str(exc)
@@ -767,6 +787,9 @@ class VBFClient:
             "invalid_ref_schema",
             "unknown_ref_step",
             "forward_ref_step",
+            "plan must be a dict with 'steps' field",
+            "plan missing 'steps' field",
+            "plan 'steps' must be a list",
             "plan_gate_",
             "llm parse error",
         ]
@@ -1312,6 +1335,7 @@ Consider the current scene state when planning.
                 if subset_key in seen_subset_keys:
                     continue
                 seen_subset_keys.add(subset_key)
+                raw_plan: Any = None
 
                 print(
                     "[VBF] planning_subset "
@@ -1330,9 +1354,11 @@ Consider the current scene state when planning.
                     return plan, steps
                 except ValueError as e:
                     last_error = e
+                    self._record_plan_shape_failure(str(e), raw_plan, stage="plan_round")
                     if not self._is_recoverable_plan_error(str(e)):
                         raise
                     repair_prompt = self._build_plan_repair_prompt(prompt, str(e))
+                    repaired_raw_plan: Any = None
                     try:
                         repaired_raw_plan = await self._call_plan_with_format_retry(
                             adapter,
@@ -1345,6 +1371,11 @@ Consider the current scene state when planning.
                         return plan, steps
                     except ValueError as repair_err:
                         last_error = repair_err
+                        self._record_plan_shape_failure(
+                            str(repair_err),
+                            repaired_raw_plan,
+                            stage="plan_round_repair",
+                        )
                         if not self._is_recoverable_plan_error(str(repair_err)):
                             raise
                         continue

@@ -111,19 +111,69 @@ def validate_plan_references(plan: Dict[str, Any]) -> None:
             seen_step_ids.add(sid_normalized)
 
 
-def extract_skills_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract the skills_plan from LLM response if wrapped.
+def _looks_like_step_dict(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if isinstance(item.get("skill"), str) and item.get("skill"):
+        return True
+    if isinstance(item.get("step_id"), str) and item.get("step_id"):
+        return True
+    for key in ("args", "params", "parameters", "on_success", "stage"):
+        if key in item:
+            return True
+    return False
 
-    Some LLMs return {"skills_plan": {...}} instead of a direct plan.
 
-    Args:
-        plan: The raw LLM response
+def _looks_like_steps_list(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(item, dict) for item in value) and any(
+        _looks_like_step_dict(item) for item in value
+    )
 
-    Returns:
-        The extracted plan or original plan if not wrapped
-    """
-    if isinstance(plan, dict) and "skills_plan" in plan:
-        return plan["skills_plan"]
+
+def _find_plan_container(value: Any, depth: int = 0) -> Dict[str, Any] | None:
+    """Find a dict containing `steps` from common or arbitrary wrapper layouts."""
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        steps = value.get("steps")
+        if isinstance(steps, list):
+            # Accept empty list (later normalized as no executable steps) or
+            # list with step-like structures.
+            if not steps or _looks_like_steps_list(steps):
+                return value
+
+        # Common provider/model wrappers first.
+        for key in ("skills_plan", "plan", "output", "result", "data", "response"):
+            nested = value.get(key)
+            found = _find_plan_container(nested, depth + 1)
+            if found is not None:
+                return found
+
+        # Generic recursive scan over all nested values as a fallback.
+        for nested in value.values():
+            found = _find_plan_container(nested, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        # Some models may directly return step list.
+        if _looks_like_steps_list(value):
+            return {"steps": value}
+
+        # Some models may wrap the plan object in arrays.
+        for nested in value:
+            found = _find_plan_container(nested, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def extract_skills_plan(plan: Any) -> Any:
+    """Extract executable plan from raw LLM response wrappers when possible."""
+    found = _find_plan_container(plan)
+    if found is not None:
+        return found
     return plan
 
 

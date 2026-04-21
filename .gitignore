@@ -54,6 +54,7 @@ docs/archived/architecture_analysis.md
 vbf/config/llm_config.json.copy
 TASK_STATE_SNAPSHOT.md
 vbf/config/last_gen_fail.txt
+vbf/config/last_plan_fail.txt
 /vbf/agent/memory/test-history
 /vbf/agent/memory/test-msgs
 /vbf/agent/memory/test-prefs
@@ -61,3 +62,5 @@ vbf/config/last_gen_fail.txt
 /vbf/agent/memory
 /codex_memory
 vbf/config/prompt_test.md
+tests/test_openai_compat_adapter_response_format.py
+tests/test_client_plan_retry.py

@@ -569,6 +569,24 @@ class OpenAICompatAdapter(VBFModelAdapter):
         }
 
     @staticmethod
+    def _is_empty_chunk_payload(payload: Any) -> bool:
+        """Detect empty chunk-like provider payloads (no usable completion)."""
+        obj = ""
+        choices = None
+        if isinstance(payload, dict):
+            obj = str(payload.get("object", "") or "")
+            choices = payload.get("choices")
+        else:
+            obj = str(getattr(payload, "object", "") or "")
+            choices = getattr(payload, "choices", None)
+
+        if not obj.startswith("chat.completion"):
+            return False
+        if not isinstance(choices, list):
+            return False
+        return len(choices) == 0
+
+    @staticmethod
     def _extract_markdown_json_block(content: str) -> str:
         match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL | re.IGNORECASE)
         if match:
@@ -770,6 +788,60 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         print("[VBF] fallback_mode=disable_function_calling_tools")
                         continue
                     raise RuntimeError(f"LLM API error ({e.status_code}): {e.message}") from e
+
+                # Some gateways return empty chunk payloads with no choices/content.
+                # Treat this as a compatibility issue and progressively downgrade.
+                if self._is_empty_chunk_payload(resp):
+                    if allow_tools:
+                        allow_tools = False
+                        self._allow_tools = False
+                        self._persist_compat_mode()
+                        print("[VBF] fallback_mode=empty_chunk_disable_tools_retry")
+                        continue
+                    if allow_json_object:
+                        allow_json_object = False
+                        self._allow_json_object = False
+                        self._persist_compat_mode()
+                        print("[VBF] fallback_mode=empty_chunk_disable_json_object_retry")
+                        continue
+                    raise RuntimeError("LLM returned empty chunk payload with no choices")
+
+                # Some OpenAI-compatible gateways return plain text directly
+                # instead of a ChatCompletion object.
+                if isinstance(resp, str):
+                    raw = resp.strip()
+                    if raw.startswith("{") or raw.startswith("["):
+                        try:
+                            parsed = json.loads(raw)
+                            if self._is_empty_chunk_payload(parsed):
+                                if allow_tools:
+                                    allow_tools = False
+                                    self._allow_tools = False
+                                    self._persist_compat_mode()
+                                    print("[VBF] fallback_mode=empty_chunk_disable_tools_retry")
+                                    continue
+                                if allow_json_object:
+                                    allow_json_object = False
+                                    self._allow_json_object = False
+                                    self._persist_compat_mode()
+                                    print("[VBF] fallback_mode=empty_chunk_disable_json_object_retry")
+                                    continue
+                                raise RuntimeError("LLM returned empty chunk payload with no choices")
+                            if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
+                                return parsed
+                            if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
+                                return {"steps": parsed}
+                            return self.parse_response(parsed)
+                        except json.JSONDecodeError:
+                            pass
+                    return self.parse_response(resp)
+
+                # Some gateways return plain dict payloads instead of SDK
+                # response models; parse through the configured content path.
+                if isinstance(resp, dict):
+                    if isinstance(resp.get("steps"), list):
+                        return resp
+                    return self.parse_response(resp)
 
                 choice = resp.choices[0]
                 finish_reason = choice.finish_reason
