@@ -140,6 +140,7 @@ class VBFModelAdapter(ABC):
         user_input: str,
         context: Optional[Dict] = None,
         stream: bool = False,
+        skills_subset: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Format messages for specific model API.
 
@@ -147,6 +148,7 @@ class VBFModelAdapter(ABC):
             user_input: User's natural language input
             context: Optional project context
             stream: Whether streaming response is expected
+            skills_subset: Optional subset of skills to expose in prompt
         """
         pass
 

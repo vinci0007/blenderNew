@@ -112,3 +112,33 @@ def test_parse_response_returns_parse_stage_when_json_is_malformed():
     assert parsed["error"] == "Failed to parse JSON from response"
     assert parsed["parse_stage"] == "strict_json_loads"
     assert "fallback_mode" in parsed
+
+
+def test_build_system_prompt_includes_schema_cards_when_tools_off():
+    adapter = OpenAICompatAdapter(
+        model_name="default",
+        model_config={
+            "base_url": "http://127.0.0.1:12347/v1",
+            "default_model": "dummy-model",
+            "response_format": {"type": "json_object"},
+            "use_function_calling": True,
+            "schema_cards_limit": 2,
+        },
+        client=None,
+    )
+
+    adapter._allow_tools = False
+    adapter.list_skill_summaries = lambda: {
+        "create_primitive": "create mesh primitive",
+        "set_parent": "set parent relation",
+    }
+    adapter.get_skill_full = lambda skill_name: {
+        "args": {
+            "name": {"required": True, "type": "str"},
+            "location": {"required": False, "type": "list"},
+        }
+    }
+
+    prompt = adapter.build_system_prompt(skills_subset=["create_primitive", "set_parent"])
+    assert "Schema Cards (Tools-Off Fallback)" in prompt
+    assert "create_primitive | required:" in prompt

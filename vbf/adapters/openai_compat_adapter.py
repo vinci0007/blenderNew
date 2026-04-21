@@ -189,6 +189,56 @@ class OpenAICompatAdapter(VBFModelAdapter):
         """
         return f"- **{skill_name}**: {description}"
 
+    @staticmethod
+    def _normalize_type_hint(type_hint: Any) -> str:
+        raw = str(type_hint or "any").lower()
+        if "int" in raw:
+            return "int"
+        if "float" in raw or "double" in raw:
+            return "float"
+        if "bool" in raw:
+            return "bool"
+        if "dict" in raw or "mapping" in raw:
+            return "dict"
+        if "list" in raw or "tuple" in raw or "sequence" in raw:
+            return "list"
+        if "str" in raw or "string" in raw:
+            return "str"
+        return "any"
+
+    def _build_schema_cards(self, skills_to_include: List[str], max_cards: int = 12) -> str:
+        cards: List[str] = []
+        for skill_name in skills_to_include[:max_cards]:
+            skill = self.get_skill_full(skill_name) or {}
+            args = skill.get("args")
+            if not isinstance(args, dict):
+                continue
+
+            required_fields: List[str] = []
+            optional_fields: List[str] = []
+            for param_name, param_info in args.items():
+                if not isinstance(param_name, str):
+                    continue
+                info = param_info if isinstance(param_info, dict) else {}
+                type_hint = self._normalize_type_hint(info.get("type"))
+                field_repr = f"{param_name}:{type_hint}"
+                if info.get("required") is True:
+                    required_fields.append(field_repr)
+                else:
+                    optional_fields.append(field_repr)
+
+            req_txt = ", ".join(required_fields[:6]) if required_fields else "none"
+            opt_txt = ", ".join(optional_fields[:6]) if optional_fields else "none"
+            cards.append(f"- {skill_name} | required: {req_txt} | optional: {opt_txt}")
+
+        if not cards:
+            return ""
+        return (
+            "## Schema Cards (Tools-Off Fallback)\n"
+            "When tools are unavailable, strictly follow these signatures:\n"
+            + "\n".join(cards)
+        )
+
     def build_system_prompt(
         self, skills_subset: Optional[List[str]] = None
     ) -> str:
@@ -225,6 +275,13 @@ class OpenAICompatAdapter(VBFModelAdapter):
 不要猜测不熟悉的技能参数，先调用 load_skill 了解清楚再生成计划。
 """
 
+        schema_cards = ""
+        if not self.use_function_calling or not self._allow_tools:
+            schema_cards = self._build_schema_cards(
+                skills_to_include,
+                max_cards=int(self._model_config.get("schema_cards_limit", 12)),
+            )
+
         base_prompt = f"""You are VBF (Vibe-Blender-Flow), a professional Blender 3D modeling assistant.
 
 ## Core Rules
@@ -237,6 +294,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
 7. **No hardcoded object names in assembly** - For relationship skills like set_parent/constraints/material assignment, do not hardcode names like "CameraModule". Always reference names from prior step outputs via $ref.
 8. **Creation before reference** - Every referenced object must be created in an earlier step. If a child/parent object is not explicitly created earlier, add creation steps first.
 {tool_instruction}
+{schema_cards}
 ## Available Skills ({len(skills_to_include)} total)
 {skills_text}
 
@@ -665,10 +723,28 @@ class OpenAICompatAdapter(VBFModelAdapter):
             allow_tools = bool(req_tools) and bool(self._allow_tools)
             allow_json_object = bool(self._allow_json_object)
             max_attempts = 4
+            tools_off_cards = ""
+            has_tools_off_cards = any(
+                isinstance(msg, dict)
+                and msg.get("role") == "system"
+                and "Schema Cards (Tools-Off Fallback)" in str(msg.get("content", ""))
+                for msg in req_messages
+            )
 
             for attempt in range(max_attempts):
+                request_messages = req_messages
+                if not allow_tools:
+                    if not tools_off_cards and not has_tools_off_cards:
+                        tools_off_cards = self._build_schema_cards(
+                            self._get_skills_for_prompt(),
+                            max_cards=int(self._model_config.get("schema_cards_limit", 12)),
+                        )
+                    if tools_off_cards:
+                        request_messages = req_messages + [
+                            {"role": "system", "content": tools_off_cards}
+                        ]
                 request_body = self._build_api_request_with_mode(
-                    req_messages,
+                    request_messages,
                     req_tools,
                     allow_tools=allow_tools,
                     allow_json_object=allow_json_object,

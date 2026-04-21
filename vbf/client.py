@@ -583,6 +583,210 @@ class VBFClient:
             ]
         )
 
+    @staticmethod
+    def _tokenize_prompt_for_skills(prompt: str) -> Set[str]:
+        return set(re.findall(r"[a-z0-9_]+", (prompt or "").lower()))
+
+    @staticmethod
+    def _get_core_skills() -> Set[str]:
+        return {
+            "create_primitive",
+            "create_beveled_box",
+            "add_modifier_boolean",
+            "boolean_tool",
+            "add_modifier_bevel",
+            "apply_modifier",
+            "set_parent",
+            "delete_object",
+            "rename_object",
+            "create_camera",
+            "set_camera_active",
+            "create_light",
+            "set_light_properties",
+            "assign_material",
+            "create_material_pbr",
+            "set_render_engine",
+            "set_render_resolution",
+            "set_cycles_samples",
+            "render_image",
+        }
+
+    def _rank_skills_for_prompt(
+        self,
+        adapter: Any,
+        prompt: str,
+        allowed_skills: List[str],
+    ) -> List[str]:
+        tokens = self._tokenize_prompt_for_skills(prompt)
+        core = self._get_core_skills()
+
+        scored: List[Tuple[int, str]] = []
+        for idx, skill in enumerate(allowed_skills):
+            score = 0
+            skill_tokens = set(re.findall(r"[a-z0-9_]+", skill.lower()))
+            if skill in core:
+                score += 60
+            if skill_tokens & tokens:
+                score += 40
+            try:
+                desc = adapter.get_skill_description(skill) or ""
+            except Exception:
+                desc = ""
+            desc_tokens = set(re.findall(r"[a-z0-9_]+", desc.lower()))
+            overlap = len(desc_tokens & tokens)
+            score += min(overlap, 8) * 3
+            # Stable tiebreak by original order.
+            scored.append((score * 1000 - idx, skill))
+
+        scored.sort(reverse=True)
+        ranked = [skill for _, skill in scored]
+        # Ensure core skills are always retained even if low score due sparse prompt.
+        for skill in allowed_skills:
+            if skill in core and skill not in ranked:
+                ranked.append(skill)
+        return ranked
+
+    def _derive_skill_subset(
+        self,
+        adapter: Any,
+        prompt: str,
+        allowed_skills: List[str],
+        size: int,
+    ) -> List[str]:
+        if size >= len(allowed_skills):
+            return list(allowed_skills)
+        ranked = self._rank_skills_for_prompt(adapter, prompt, allowed_skills)
+        picked = ranked[:size]
+        core = self._get_core_skills()
+        for skill in allowed_skills:
+            if skill in core and skill not in picked:
+                picked.append(skill)
+        # Preserve deterministic order by source list.
+        allowed_set = set(picked)
+        return [s for s in allowed_skills if s in allowed_set]
+
+    @staticmethod
+    def _guess_python_type_name(value: Any) -> str:
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, int) and not isinstance(value, bool):
+            return "int"
+        if isinstance(value, float):
+            return "float"
+        if isinstance(value, str):
+            return "str"
+        if isinstance(value, dict):
+            return "dict"
+        if isinstance(value, list):
+            return "list"
+        return type(value).__name__
+
+    @staticmethod
+    def _matches_expected_type(expected_hint: str, value: Any) -> bool:
+        hint = (expected_hint or "any").lower()
+        if hint in {"any", "typing.any"}:
+            return True
+        if isinstance(value, dict) and "$ref" in value:
+            # Type resolved at runtime; do not fail preflight.
+            return True
+        if isinstance(value, str) and value.startswith("$ref:"):
+            return True
+        if ("bool" in hint and isinstance(value, bool)):
+            return True
+        if ("int" in hint and isinstance(value, int) and not isinstance(value, bool)):
+            return True
+        if ("float" in hint and isinstance(value, (int, float)) and not isinstance(value, bool)):
+            return True
+        if ("str" in hint and isinstance(value, str)):
+            return True
+        if (("list" in hint or "tuple" in hint or "sequence" in hint) and isinstance(value, list)):
+            return True
+        if (("dict" in hint or "mapping" in hint) and isinstance(value, dict)):
+            return True
+        return False
+
+    def _validate_plan_with_skill_schemas(
+        self,
+        plan: Dict[str, Any],
+        adapter: Any,
+        allowed_skills: List[str],
+    ) -> None:
+        steps = plan.get("steps")
+        if not isinstance(steps, list):
+            return
+        allowed_set = set(allowed_skills)
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            skill = step.get("skill")
+            if not isinstance(skill, str) or not skill:
+                raise ValueError(f"plan_gate_invalid_skill: step[{idx}] missing valid skill")
+            if skill not in allowed_set:
+                raise ValueError(f"plan_gate_unknown_skill: step[{idx}] skill={skill!r} not in allowed set")
+
+            args = step.get("args", {})
+            if not isinstance(args, dict):
+                raise ValueError(f"plan_gate_invalid_args: step[{idx}] args must be object")
+
+            schema = None
+            try:
+                schema = adapter.get_skill_params(skill)
+            except Exception:
+                schema = None
+            if not isinstance(schema, dict) or not schema:
+                continue
+
+            for param_name, param_info in schema.items():
+                info = param_info if isinstance(param_info, dict) else {}
+                if info.get("required") is True and param_name not in args:
+                    raise ValueError(
+                        f"plan_gate_missing_required: step[{idx}] skill={skill} missing arg={param_name}"
+                    )
+
+            unknown_args = [name for name in args.keys() if name not in schema]
+            if unknown_args:
+                raise ValueError(
+                    f"plan_gate_unknown_args: step[{idx}] skill={skill} unknown={unknown_args[:6]}"
+                )
+
+            for arg_name, arg_value in args.items():
+                expected = schema.get(arg_name, {})
+                expected_type = expected.get("type") if isinstance(expected, dict) else "any"
+                if not self._matches_expected_type(str(expected_type), arg_value):
+                    raise ValueError(
+                        "plan_gate_type_mismatch: "
+                        f"step[{idx}] skill={skill} arg={arg_name} "
+                        f"expected={expected_type} actual={self._guess_python_type_name(arg_value)}"
+                    )
+
+    @staticmethod
+    def _is_recoverable_plan_error(message: str) -> bool:
+        msg = (message or "").lower()
+        tokens = [
+            "no executable steps",
+            "invalid_ref_schema",
+            "unknown_ref_step",
+            "forward_ref_step",
+            "plan_gate_",
+            "llm parse error",
+        ]
+        return any(token in msg for token in tokens)
+
+    @staticmethod
+    def _build_plan_repair_prompt(prompt: str, error_message: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "IMPORTANT:\n"
+            "- Return ONLY executable Blender skills in steps[].\n"
+            "- Do NOT use load_skill as a step skill.\n"
+            "- Every step must have a valid skill name and args object.\n"
+            "- Use ONLY skills from Available Skills in system prompt.\n"
+            "- Use ONLY $ref paths in this format: step_<id>.data.<field> or <id>.data.<field>.\n"
+            "- Never use scene.objects[...] as a $ref target.\n"
+            "- If an object is referenced, it must be created in an earlier step.\n"
+            f"- Previous validation error to fix: {error_message}\n"
+        )
+
     def _should_use_two_stage_planning(
         self,
         prompt: str,
@@ -1085,51 +1289,69 @@ Consider the current scene state when planning.
             # SkillRegistry (loaded via Blender RPC). format_messages() wraps
             # it with the user's modeling prompt.
             adapter = await self._ensure_adapter()
-            raw_plan = await self._call_plan_with_format_retry(
-                adapter,
-                prompt,
-                skills_subset=allowed_skills,
-            )
+            topk = max(20, int(os.getenv("VBF_SKILL_TOPK", "90")))
+            expand_factor = max(1.2, float(os.getenv("VBF_SKILL_TOPK_EXPAND_FACTOR", "1.6")))
 
-            # First pass normalization.
-            try:
-                plan = normalize_plan(raw_plan)
-                steps = validate_plan_structure(plan)
-            except ValueError as e:
-                # Common model failure: returns only planning-time pseudo tool steps
-                # (e.g., load_skill) or invalid refs. Retry once with stricter constraints.
-                msg = str(e).lower()
-                if not any(
-                    token in msg
-                    for token in [
-                        "no executable steps",
-                        "invalid_ref_schema",
-                        "unknown_ref_step",
-                        "forward_ref_step",
-                    ]
-                ):
-                    raise
-                repair_prompt = (
-                    f"{prompt}\n\n"
-                    "IMPORTANT:\n"
-                    "- Return ONLY executable Blender skills in steps[].\n"
-                    "- Do NOT use load_skill as a step skill.\n"
-                    "- Every step must have a valid skill name and args object.\n"
-                    "- Ensure at least one executable step is present.\n"
-                    "- Use ONLY $ref paths in this format: step_<id>.data.<field> or <id>.data.<field>.\n"
-                    "- Never use scene.objects[...] as a $ref target.\n"
-                    "- For set_parent and other relationship steps, NEVER hardcode object names; use $ref from previous creation step results.\n"
-                    "- If an object is referenced, it must be created in an earlier step."
-                )
-                repaired_raw_plan = await self._call_plan_with_format_retry(
-                    adapter,
-                    repair_prompt,
-                    skills_subset=allowed_skills,
-                )
-                plan = normalize_plan(repaired_raw_plan)
-                steps = validate_plan_structure(plan)
+            subset_candidates: List[List[str]] = []
+            first_subset = self._derive_skill_subset(adapter, prompt, allowed_skills, topk)
+            subset_candidates.append(first_subset)
 
-            return plan, steps
+            expanded_size = min(len(allowed_skills), int(round(topk * expand_factor)))
+            if expanded_size > len(first_subset):
+                subset_candidates.append(
+                    self._derive_skill_subset(adapter, prompt, allowed_skills, expanded_size)
+                )
+            if len(allowed_skills) > len(subset_candidates[-1]):
+                subset_candidates.append(list(allowed_skills))
+
+            seen_subset_keys: Set[Tuple[str, ...]] = set()
+            last_error: Optional[Exception] = None
+
+            for round_idx, skill_subset in enumerate(subset_candidates, start=1):
+                subset_key = tuple(skill_subset)
+                if subset_key in seen_subset_keys:
+                    continue
+                seen_subset_keys.add(subset_key)
+
+                print(
+                    "[VBF] planning_subset "
+                    f"round={round_idx}/{len(subset_candidates)} "
+                    f"skills={len(skill_subset)}"
+                )
+                try:
+                    raw_plan = await self._call_plan_with_format_retry(
+                        adapter,
+                        prompt,
+                        skills_subset=skill_subset,
+                    )
+                    plan = normalize_plan(raw_plan)
+                    steps = validate_plan_structure(plan)
+                    self._validate_plan_with_skill_schemas(plan, adapter, skill_subset)
+                    return plan, steps
+                except ValueError as e:
+                    last_error = e
+                    if not self._is_recoverable_plan_error(str(e)):
+                        raise
+                    repair_prompt = self._build_plan_repair_prompt(prompt, str(e))
+                    try:
+                        repaired_raw_plan = await self._call_plan_with_format_retry(
+                            adapter,
+                            repair_prompt,
+                            skills_subset=skill_subset,
+                        )
+                        plan = normalize_plan(repaired_raw_plan)
+                        steps = validate_plan_structure(plan)
+                        self._validate_plan_with_skill_schemas(plan, adapter, skill_subset)
+                        return plan, steps
+                    except ValueError as repair_err:
+                        last_error = repair_err
+                        if not self._is_recoverable_plan_error(str(repair_err)):
+                            raise
+                        continue
+
+            if last_error is not None:
+                raise last_error
+            raise ValueError("Plan generation failed with empty subset candidate list")
         except ValueError as e:
             if "not configured" in str(e):
                 raise self._create_interrupt(
@@ -1457,15 +1679,37 @@ Instructions:
 6) If an object is referenced, ensure it is explicitly created earlier in the same plan.
 {corrective_block}
 """
-        replan_subset = allowed_skills[:140] if len(allowed_skills) > 140 else allowed_skills
-        raw_plan = await self._call_plan_with_format_retry(
+        subset_small = self._derive_skill_subset(
             adapter,
             replan_prompt,
-            skills_subset=replan_subset,
+            allowed_skills,
+            min(140, max(30, int(os.getenv("VBF_REPLAN_SKILL_TOPK", "70")))),
         )
-        plan = normalize_plan(raw_plan)
-        new_steps = validate_plan_structure(plan)
-        return plan, new_steps
+        subset_candidates: List[List[str]] = [subset_small]
+        if len(allowed_skills) > len(subset_small):
+            subset_candidates.append(list(allowed_skills))
+
+        last_error: Optional[Exception] = None
+        for subset in subset_candidates:
+            try:
+                raw_plan = await self._call_plan_with_format_retry(
+                    adapter,
+                    replan_prompt,
+                    skills_subset=subset,
+                )
+                plan = normalize_plan(raw_plan)
+                new_steps = validate_plan_structure(plan)
+                self._validate_plan_with_skill_schemas(plan, adapter, subset)
+                return plan, new_steps
+            except ValueError as e:
+                last_error = e
+                if not self._is_recoverable_plan_error(str(e)):
+                    raise
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise ValueError("Replan generation failed without candidate subsets")
 
     def _inject_scene_context(
         self,
