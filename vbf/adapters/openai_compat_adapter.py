@@ -476,9 +476,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
         user_input: str,
         context: Optional[Dict] = None,
         stream: bool = False,
+        skills_subset: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Format messages for OpenAI-compatible API."""
-        messages = [{"role": "system", "content": self.build_system_prompt()}]
+        messages = [{"role": "system", "content": self.build_system_prompt(skills_subset=skills_subset)}]
 
         if context:
             context_str = json.dumps(context, indent=2, ensure_ascii=False)
@@ -501,6 +502,52 @@ class OpenAICompatAdapter(VBFModelAdapter):
         messages.append({"role": "user", "content": user_input})
         return messages
 
+    def _compat_mode_snapshot(self) -> Dict[str, Any]:
+        return {
+            "allow_tools": bool(self._allow_tools),
+            "allow_json_object": bool(self._allow_json_object),
+            "model": self.default_model,
+            "base_url": self.base_url,
+        }
+
+    @staticmethod
+    def _extract_markdown_json_block(content: str) -> str:
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return content.strip()
+
+    @staticmethod
+    def _extract_outermost_json_object(content: str) -> Optional[str]:
+        start = content.find("{")
+        if start < 0:
+            return None
+
+        in_string = False
+        escaped = False
+        depth = 0
+        for idx in range(start, len(content)):
+            ch = content[idx]
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return content[start : idx + 1]
+        return None
+
     def parse_response(self, response: Any) -> Dict[str, Any]:
         """Parse OpenAI-compatible API response to VBF plan.
 
@@ -516,34 +563,39 @@ class OpenAICompatAdapter(VBFModelAdapter):
         content = self._extract_content(response)
 
         if not content:
-            return {"error": "Empty response from API"}
+            return {
+                "error": "Empty response from API",
+                "parse_stage": "extract_content",
+                "raw_content": "",
+                "fallback_mode": self._compat_mode_snapshot(),
+            }
 
-        # Try parsing as JSON directly
+        raw_content = str(content)
+        parse_stage = "strip_markdown"
+        cleaned_content = self._extract_markdown_json_block(raw_content)
+
+        parse_stage = "extract_outermost_json"
+        json_text = self._extract_outermost_json_object(cleaned_content)
+        if json_text is None:
+            return {
+                "error": "Failed to extract outermost JSON object from response",
+                "parse_stage": parse_stage,
+                "raw_content": raw_content[:12000],
+                "fallback_mode": self._compat_mode_snapshot(),
+            }
+
+        parse_stage = "strict_json_loads"
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
-
-        # Try extracting JSON from markdown code block
-        json_match = re.search(r"```json\s*(.*?)\s*```", content, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try finding any JSON object pattern
-        obj_match = re.search(r"\{[\s\S]*\}", content)
-        if obj_match:
-            try:
-                return json.loads(obj_match.group())
-            except json.JSONDecodeError:
-                pass
-
-        return {
-            "error": "Failed to parse JSON from response",
-            "raw_content": content[:500],
-        }
+            return json.loads(json_text)
+        except json.JSONDecodeError as e:
+            return {
+                "error": "Failed to parse JSON from response",
+                "parse_stage": parse_stage,
+                "parse_detail": str(e),
+                "raw_content": raw_content[:12000],
+                "extracted_json": json_text[:12000],
+                "fallback_mode": self._compat_mode_snapshot(),
+            }
 
     def _extract_content(self, response: Any) -> Optional[str]:
         """Extract message content from API response using configurable path."""
@@ -633,13 +685,13 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         allow_json_object = False
                         self._allow_json_object = False
                         self._persist_compat_mode()
-                        print("[VBF] LLM compatibility fallback: disable response_format=json_object")
+                        print("[VBF] fallback_mode=disable_response_format_json_object")
                         continue
                     if self._should_retry_without_tools(e, request_body) and allow_tools:
                         allow_tools = False
                         self._allow_tools = False
                         self._persist_compat_mode()
-                        print("[VBF] LLM compatibility fallback: disable function-calling tools")
+                        print("[VBF] fallback_mode=disable_function_calling_tools")
                         continue
                     raise RuntimeError(f"LLM API error ({e.status_code}): {e.message}") from e
 
@@ -687,13 +739,13 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         allow_tools = False
                         self._allow_tools = False
                         self._persist_compat_mode()
-                        print("[VBF] LLM compatibility fallback: empty content -> disable tools and retry")
+                        print("[VBF] fallback_mode=empty_content_disable_tools_retry")
                         continue
                     if allow_json_object:
                         allow_json_object = False
                         self._allow_json_object = False
                         self._persist_compat_mode()
-                        print("[VBF] LLM compatibility fallback: empty content -> disable json_object and retry")
+                        print("[VBF] fallback_mode=empty_content_disable_json_object_retry")
                         continue
                     raise RuntimeError(
                         f"LLM returned empty content (finish_reason={finish_reason})"

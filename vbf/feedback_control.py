@@ -123,7 +123,12 @@ class ClosedLoopControl:
             self._failed_steps.append((step_id, validation))
             return FeedbackDecision(
                 action="replan",
-                detail={"step_id": step_id, "error": str(e), "reason": "resolve_refs_failed"},
+                detail={
+                    "step_id": step_id,
+                    "skill": skill,
+                    "error": str(e),
+                    "reason": "resolve_refs_failed",
+                },
                 validation=validation,
             ), None
         stage = step.get("stage", "detail")
@@ -184,12 +189,22 @@ class ClosedLoopControl:
             if self.enable_auto_check:
                 return FeedbackDecision(
                     action="replan",
-                    detail={"step_id": step_id, "error": str(e), "reason": "execute_skill_failed"},
+                    detail={
+                        "step_id": step_id,
+                        "skill": skill,
+                        "error": str(e),
+                        "reason": "execute_skill_failed",
+                    },
                     validation=validation,
                 ), None
             return FeedbackDecision(
                 action="continue",
-                detail={"step_id": step_id, "error": str(e), "reason": "execute_skill_failed"},
+                detail={
+                    "step_id": step_id,
+                    "skill": skill,
+                    "error": str(e),
+                    "reason": "execute_skill_failed",
+                },
                 validation=validation,
             ), None
 
@@ -205,13 +220,23 @@ class ClosedLoopControl:
             if self.enable_auto_check:
                 return FeedbackDecision(
                     action="replan",
-                    detail={"step_id": step_id, "error": error_msg},
+                    detail={
+                        "step_id": step_id,
+                        "skill": skill,
+                        "error": error_msg,
+                        "reason": "execute_result_failed",
+                    },
                     validation=validation,
                 ), None
 
             return FeedbackDecision(
                 action="continue",
-                detail={"step_id": step_id, "error": error_msg},
+                detail={
+                    "step_id": step_id,
+                    "skill": skill,
+                    "error": error_msg,
+                    "reason": "execute_result_failed",
+                },
                 validation=validation,
             ), None
 
@@ -243,6 +268,7 @@ class ClosedLoopControl:
                         detail={
                             "step_id": step_id,
                             "skill": skill,
+                            "reason": "validation_failed",
                             "delta": delta.to_dict(),
                         },
                         validation=validation,

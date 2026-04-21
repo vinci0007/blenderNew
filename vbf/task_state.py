@@ -14,7 +14,7 @@ class TaskState:
 
     __slots__ = [
         'prompt', 'plan', 'steps', 'step_results',
-        'current_step_index', 'allowed_skills', 'skill_schemas', 'saved_at'
+        'current_step_index', 'allowed_skills', 'skill_schemas', 'diagnostics', 'saved_at'
     ]
 
     def __init__(
@@ -26,6 +26,7 @@ class TaskState:
         current_step_index: int,
         allowed_skills: List[str],
         skill_schemas: Optional[Dict[str, Any]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ):
         self.prompt = prompt
         self.plan = plan
@@ -34,6 +35,7 @@ class TaskState:
         self.current_step_index = current_step_index
         self.allowed_skills = allowed_skills
         self.skill_schemas = skill_schemas
+        self.diagnostics = diagnostics or {}
         self.saved_at: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -47,6 +49,7 @@ class TaskState:
             "current_step_index": self.current_step_index,
             "allowed_skills": self.allowed_skills,
             "skill_schemas": self.skill_schemas,
+            "diagnostics": self.diagnostics,
         }
 
     @classmethod
@@ -59,6 +62,7 @@ class TaskState:
             current_step_index=data["current_step_index"],
             allowed_skills=data["allowed_skills"],
             skill_schemas=data.get("skill_schemas"),
+            diagnostics=data.get("diagnostics"),
         )
         state.saved_at = data.get("saved_at")
         return state

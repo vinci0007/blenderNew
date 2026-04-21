@@ -22,7 +22,9 @@ Migration: All LLM calls now use the adapter via:
 import asyncio
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import copy
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .jsonrpc_ws import JsonRpcWebSocketClient, JsonRpcError
 from .adapters import get_adapter
@@ -140,11 +142,38 @@ class VBFClient:
         async def _call():
             response = await adapter.call_llm(messages)
             if isinstance(response, dict) and "error" in response:
-                raw = response.get("raw_content", str(response))
-                raise ValueError(f"LLM parse error: {raw[:200]}")
+                self._record_llm_parse_failure(response)
+                parse_stage = response.get("parse_stage", "unknown")
+                raw = str(response.get("raw_content", str(response)))
+                excerpt = raw[:500]
+                raise ValueError(
+                    f"LLM parse error (parse_stage={parse_stage}): {excerpt}"
+                )
             return response
 
         return await call_llm_with_throttle(_call)
+
+    def _record_llm_parse_failure(self, payload: Dict[str, Any]) -> None:
+        """Persist the latest parse failure with full context for debugging."""
+        try:
+            save_path = os.path.join(os.path.dirname(__file__), "config", "last_gen_fail.txt")
+            content = {
+                "error": payload.get("error"),
+                "parse_stage": payload.get("parse_stage"),
+                "parse_detail": payload.get("parse_detail"),
+                "fallback_mode": payload.get("fallback_mode"),
+                "raw_content": payload.get("raw_content"),
+                "extracted_json": payload.get("extracted_json"),
+            }
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(content, ensure_ascii=False, indent=2))
+        except Exception:
+            # Parse-failure logging must not crash the main control flow.
+            pass
+
+    @staticmethod
+    def _is_llm_parse_error(exc: Exception) -> bool:
+        return "LLM parse error" in str(exc)
 
     # --- WebSocket / Blender RPC ---
 
@@ -479,6 +508,7 @@ class VBFClient:
                           plan: Dict = None, steps: List = None,
                           step_results: Dict = None, current_index: int = 0,
                           allowed_skills: List = None,
+                          diagnostics: Dict[str, Any] = None,
                           cause: Exception = None) -> TaskInterruptedError:
         """Create and return a TaskInterruptedError with saved state."""
         state = TaskState(
@@ -488,6 +518,7 @@ class VBFClient:
             step_results=step_results or {},
             current_step_index=current_index,
             allowed_skills=allowed_skills or [],
+            diagnostics=diagnostics or {},
         )
         state.save(save_path)
         print(f"[VBF] {reason}")
@@ -498,6 +529,290 @@ class VBFClient:
             state=state,
             state_path=save_path
         )
+
+    @staticmethod
+    def _build_json_format_retry_prompt(prompt: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "FORMAT REQUIREMENT (must follow exactly):\n"
+            "- Return plain JSON only (no markdown fences).\n"
+            "- Output must be a single JSON object.\n"
+            "- Keep the same user intent; do not change task semantics.\n"
+            "- Include top-level `steps` array with executable Blender skills."
+        )
+
+    async def _call_plan_with_format_retry(
+        self,
+        adapter: Any,
+        prompt: str,
+        skills_subset: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Call planner once, then retry once with strict-format constraints on parse errors."""
+        def _format(p: str) -> List[Dict[str, Any]]:
+            try:
+                return adapter.format_messages(p, skills_subset=skills_subset)
+            except TypeError:
+                # Backward compatibility for test doubles / older adapters.
+                return adapter.format_messages(p)
+
+        try:
+            return await self._adapter_call(_format(prompt))
+        except ValueError as e:
+            if not self._is_llm_parse_error(e):
+                raise
+            match = re.search(r"parse_stage=([^)]+)", str(e))
+            stage = match.group(1) if match else "unknown"
+            print(f"[VBF] parse_stage={stage} retry_mode=structured_json_retry")
+            retry_prompt = self._build_json_format_retry_prompt(prompt)
+            return await self._adapter_call(_format(retry_prompt))
+
+    @staticmethod
+    def _build_error_signature(error_text: Any) -> str:
+        text = str(error_text or "").strip().lower()
+        if not text:
+            return "none"
+        text = re.sub(r"\s+", " ", text)
+        return text[:160]
+
+    def _build_replan_fingerprint(self, reason: str, skill: str, error_text: Any) -> str:
+        return "|".join(
+            [
+                str(reason or "unknown"),
+                str(skill or "unknown"),
+                self._build_error_signature(error_text),
+            ]
+        )
+
+    def _should_use_two_stage_planning(
+        self,
+        prompt: str,
+        allowed_skills: List[str],
+    ) -> bool:
+        """Decide whether to use geometry->presentation two-stage planning."""
+        mode = os.getenv("VBF_TWO_STAGE_PLANNING", "auto").strip().lower()
+        if mode in {"1", "true", "on", "always"}:
+            return True
+        if mode in {"0", "false", "off", "never"}:
+            return False
+        # Auto mode: trigger on long prompts or very large skill sets.
+        return len(prompt) >= 700 or len(allowed_skills) >= 180
+
+    @staticmethod
+    def _classify_skills_for_two_stage(
+        allowed_skills: List[str],
+    ) -> Tuple[List[str], List[str]]:
+        """Split skills into geometry-first and presentation-first subsets."""
+        presentation_prefixes = (
+            "create_camera",
+            "set_camera",
+            "camera_",
+            "create_light",
+            "set_light",
+            "set_render",
+            "set_cycles",
+            "set_eevee",
+            "render_",
+            "create_material",
+            "assign_material",
+            "add_shader_",
+            "set_material_",
+            "add_texture",
+            "attach_texture",
+            "create_image_texture",
+            "compositor_",
+            "create_compositor",
+            "set_compositor",
+            "enable_pass",
+        )
+        presentation_exact = {
+            "object_shade_smooth",
+            "shade_smooth",
+            "shade_flat",
+            "object_shade_flat",
+        }
+        presentation: List[str] = []
+        geometry: List[str] = []
+        for skill in allowed_skills:
+            if skill in presentation_exact or skill.startswith(presentation_prefixes):
+                presentation.append(skill)
+            else:
+                geometry.append(skill)
+        # Ensure each phase has enough baseline skills; fallback handled by caller.
+        return geometry, presentation
+
+    @staticmethod
+    def _build_geometry_stage_prompt(prompt: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "PLANNING MODE: STAGE 1 / GEOMETRY ONLY.\n"
+            "- Focus on topology, proportions, booleans, bevel/chamfer, assembly geometry.\n"
+            "- Do not spend steps on final rendering polish.\n"
+            "- Camera/light/material/compositor steps are allowed only if strictly required for geometry inspection.\n"
+            "- Return executable VBF skills JSON only."
+        )
+
+    @staticmethod
+    def _build_presentation_stage_prompt(prompt: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "PLANNING MODE: STAGE 2 / PRESENTATION ONLY.\n"
+            "- Reuse existing geometry in scene.\n"
+            "- Focus on camera, lights, materials, render, compositor.\n"
+            "- Keep geometry edits minimal and local.\n"
+            "- Do not use $ref to steps from stage 1. If relationships are needed, use existing object names "
+            "or create local helper objects in this stage first.\n"
+            "- Return executable VBF skills JSON only."
+        )
+
+    @staticmethod
+    def _remap_ref_value(value: Any, id_map: Dict[str, str]) -> Any:
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                if k == "$ref" and isinstance(v, str):
+                    out[k] = VBFClient._remap_ref_text(v, id_map)
+                else:
+                    out[k] = VBFClient._remap_ref_value(v, id_map)
+            return out
+        if isinstance(value, list):
+            return [VBFClient._remap_ref_value(v, id_map) for v in value]
+        if isinstance(value, str) and value.startswith("$ref:"):
+            ref = value[len("$ref:") :].strip()
+            remapped = VBFClient._remap_ref_text(ref, id_map)
+            return f"$ref: {remapped}"
+        return value
+
+    @staticmethod
+    def _remap_ref_text(ref: str, id_map: Dict[str, str]) -> str:
+        match = re.match(r"^(step_)?([A-Za-z0-9_-]+)(\..+)$", ref)
+        if not match:
+            return ref
+        prefix, step_id, suffix = match.groups()
+        mapped = id_map.get(step_id)
+        if not mapped:
+            return ref
+        return f"{'step_' if prefix else ''}{mapped}{suffix}"
+
+    def _reindex_steps(
+        self,
+        steps: List[Dict[str, Any]],
+        start_index: int,
+    ) -> List[Dict[str, Any]]:
+        remapped_steps = copy.deepcopy(steps)
+        id_map: Dict[str, str] = {}
+        for idx, step in enumerate(remapped_steps, start=start_index):
+            old_id = step.get("step_id", f"{idx:03d}")
+            old_id_str = str(old_id)
+            normalized_old = old_id_str[len("step_") :] if old_id_str.startswith("step_") else old_id_str
+            new_id = f"{idx:03d}"
+            id_map[old_id_str] = new_id
+            id_map[normalized_old] = new_id
+            step["step_id"] = new_id
+
+        for step in remapped_steps:
+            for key, value in list(step.items()):
+                step[key] = self._remap_ref_value(value, id_map)
+        return remapped_steps
+
+    def _merge_two_stage_plans(
+        self,
+        geom_plan: Dict[str, Any],
+        geom_steps: List[Dict[str, Any]],
+        pres_plan: Dict[str, Any],
+        pres_steps: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        remapped_geom = self._reindex_steps(geom_steps, 1)
+        remapped_pres = self._reindex_steps(pres_steps, len(remapped_geom) + 1)
+        merged_steps = remapped_geom + remapped_pres
+
+        merged_plan: Dict[str, Any] = {
+            "vbf_version": geom_plan.get("vbf_version", pres_plan.get("vbf_version", "2.1")),
+            "plan_type": "skills_plan",
+            "steps": merged_steps,
+            "execution": {
+                "max_replans": max(
+                    int(geom_plan.get("execution", {}).get("max_replans", 5)),
+                    int(pres_plan.get("execution", {}).get("max_replans", 5)),
+                )
+            },
+            "metadata": {
+                "planning_mode": "two_stage",
+                "geometry_steps": len(remapped_geom),
+                "presentation_steps": len(remapped_pres),
+            },
+        }
+        return merged_plan, merged_steps
+
+    async def _plan_skill_task_two_stage(
+        self,
+        prompt: str,
+        allowed_skills: List[str],
+        save_path: str,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        geometry_skills, presentation_skills = self._classify_skills_for_two_stage(allowed_skills)
+        if not geometry_skills or not presentation_skills:
+            # Fallback when classifier cannot split meaningfully.
+            return await self._plan_skill_task(prompt, allowed_skills, save_path)
+
+        print(
+            "[VBF] planning_mode=two_stage "
+            f"geometry_skills={len(geometry_skills)} "
+            f"presentation_skills={len(presentation_skills)}"
+        )
+
+        geometry_prompt = self._build_geometry_stage_prompt(prompt)
+        geom_plan, geom_steps = await self._plan_skill_task(
+            geometry_prompt,
+            geometry_skills,
+            save_path,
+        )
+
+        presentation_prompt = self._build_presentation_stage_prompt(prompt)
+        try:
+            pres_plan, pres_steps = await self._plan_skill_task(
+                presentation_prompt,
+                presentation_skills,
+                save_path,
+            )
+        except TaskInterruptedError:
+            raise
+        except Exception as e:
+            print(f"[VBF] Stage-2 planning failed, keeping geometry-only plan: {e}")
+            return geom_plan, geom_steps
+
+        merged_plan, merged_steps = self._merge_two_stage_plans(
+            geom_plan,
+            geom_steps,
+            pres_plan,
+            pres_steps,
+        )
+        # Re-validate merged output for refs and structure.
+        merged_plan = normalize_plan(merged_plan)
+        merged_steps = validate_plan_structure(merged_plan)
+        return merged_plan, merged_steps
+
+    async def _plan_skill_task_auto(
+        self,
+        prompt: str,
+        allowed_skills: List[str],
+        save_path: str,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        if self._should_use_two_stage_planning(prompt, allowed_skills):
+            try:
+                return await self._plan_skill_task_two_stage(prompt, allowed_skills, save_path)
+            except TaskInterruptedError:
+                raise
+            except Exception as e:
+                print(f"[VBF] two_stage planning fallback to single-stage: {e}")
+        return await self._plan_skill_task(prompt, allowed_skills, save_path)
+
+    @staticmethod
+    def _scene_to_prompt_text(scene: SceneState, max_objects: Optional[int] = None) -> str:
+        try:
+            return scene.to_prompt_text(max_objects=max_objects)
+        except TypeError:
+            # Backward compatibility for test doubles / older SceneState implementations.
+            return scene.to_prompt_text()
 
     # --- Layer 4: Real-time Feedback ---
 
@@ -548,7 +863,7 @@ class VBFClient:
 Original prompt: {prompt}
 
 Current scene state:
-{scene.to_prompt_text()}
+{self._scene_to_prompt_text(scene, max_objects=20)}
 
 Completed steps:
 {json.dumps(step_results, indent=2, ensure_ascii=False)}
@@ -556,12 +871,14 @@ Completed steps:
 Please generate a new plan starting from step "{from_step_id}".
 Consider the current scene state when planning.
 """
-        messages = adapter.format_messages(replan_prompt)
-
         try:
-            raw_plan = await self._adapter_call(messages)
+            raw_plan = await self._call_plan_with_format_retry(
+                adapter,
+                replan_prompt,
+                skills_subset=allowed_skills,
+            )
             plan = normalize_plan(raw_plan)
-            steps = plan.get("steps", [])
+            steps = validate_plan_structure(plan)
             if not steps:
                 raise ValueError("No steps in replan")
             return plan, steps
@@ -625,7 +942,7 @@ Consider the current scene state when planning.
             else:
                 styled_prompt = prompt
 
-            plan, steps = await self._plan_skill_task(styled_prompt, allowed_skills, _save_path)
+            plan, steps = await self._plan_skill_task_auto(styled_prompt, allowed_skills, _save_path)
             step_results = {}
             start_index = 0
             print(f"[VBF] Generated plan with {len(steps)} steps")
@@ -733,13 +1050,13 @@ Consider the current scene state when planning.
                 # Repair failed or max retries, save checkpoint
                 raise self._create_interrupt(
                     f"Step {step_id} failed after retries",
-                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, e
+                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, cause=e
                 )
 
             except Exception as e:
                 raise self._create_interrupt(
                     f"Unexpected error at step {step_id}",
-                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, e
+                    prompt, _save_path, plan, steps, step_results, i, allowed_skills, cause=e
                 )
 
         print(f"[VBF] Task completed: {len(step_results)} steps executed")
@@ -768,8 +1085,11 @@ Consider the current scene state when planning.
             # SkillRegistry (loaded via Blender RPC). format_messages() wraps
             # it with the user's modeling prompt.
             adapter = await self._ensure_adapter()
-            messages = adapter.format_messages(prompt)
-            raw_plan = await self._adapter_call(messages)
+            raw_plan = await self._call_plan_with_format_retry(
+                adapter,
+                prompt,
+                skills_subset=allowed_skills,
+            )
 
             # First pass normalization.
             try:
@@ -777,8 +1097,17 @@ Consider the current scene state when planning.
                 steps = validate_plan_structure(plan)
             except ValueError as e:
                 # Common model failure: returns only planning-time pseudo tool steps
-                # (e.g., load_skill). Retry once with explicit executable-only constraint.
-                if "no executable steps" not in str(e).lower():
+                # (e.g., load_skill) or invalid refs. Retry once with stricter constraints.
+                msg = str(e).lower()
+                if not any(
+                    token in msg
+                    for token in [
+                        "no executable steps",
+                        "invalid_ref_schema",
+                        "unknown_ref_step",
+                        "forward_ref_step",
+                    ]
+                ):
                     raise
                 repair_prompt = (
                     f"{prompt}\n\n"
@@ -787,11 +1116,16 @@ Consider the current scene state when planning.
                     "- Do NOT use load_skill as a step skill.\n"
                     "- Every step must have a valid skill name and args object.\n"
                     "- Ensure at least one executable step is present.\n"
+                    "- Use ONLY $ref paths in this format: step_<id>.data.<field> or <id>.data.<field>.\n"
+                    "- Never use scene.objects[...] as a $ref target.\n"
                     "- For set_parent and other relationship steps, NEVER hardcode object names; use $ref from previous creation step results.\n"
                     "- If an object is referenced, it must be created in an earlier step."
                 )
-                repair_messages = adapter.format_messages(repair_prompt)
-                repaired_raw_plan = await self._adapter_call(repair_messages)
+                repaired_raw_plan = await self._call_plan_with_format_retry(
+                    adapter,
+                    repair_prompt,
+                    skills_subset=allowed_skills,
+                )
                 plan = normalize_plan(repaired_raw_plan)
                 steps = validate_plan_structure(plan)
 
@@ -872,15 +1206,27 @@ Consider the current scene state when planning.
             print("[VBF-Feedback] Capturing current scene state...")
             scene = await self.capture_scene_state()
             print(f"[VBF-Feedback] Scene has {len(scene._objects)} objects")
-
-            scene_aware_prompt = self._inject_scene_context(styled_prompt, scene)
-            plan, steps = await self._plan_skill_task(scene_aware_prompt, allowed_skills, _save_path)
+            two_stage_mode = self._should_use_two_stage_planning(styled_prompt, allowed_skills)
+            scene_aware_prompt = self._inject_scene_context(
+                styled_prompt,
+                scene,
+                max_objects=15 if two_stage_mode else None,
+            )
+            plan, steps = await self._plan_skill_task_auto(
+                scene_aware_prompt,
+                allowed_skills,
+                _save_path,
+            )
             step_results = {}
             i = 0
             print(f"[VBF-Feedback] Generated plan with {len(steps)} steps")
 
         max_replans = int(plan.get("execution", {}).get("max_replans", 5))
         replan_count = 0
+        loop_guard_repeat_threshold = 2
+        last_replan_fingerprint: Optional[str] = None
+        consecutive_replan_hits = 0
+        forced_retry_used: Dict[str, bool] = {}
 
         loop = ClosedLoopControl(
             client=self,
@@ -918,6 +1264,22 @@ Consider the current scene state when planning.
                 reason = decision.detail.get("reason", decision.action)
                 replan_from_idx = i
                 feedback_detail = dict(decision.detail or {})
+                failing_skill = feedback_detail.get("skill") or step.get("skill") or "unknown"
+                validation = getattr(decision, "validation", None)
+                error_signature = feedback_detail.get("error") or (
+                    validation.message if validation else ""
+                )
+                replan_fingerprint = self._build_replan_fingerprint(
+                    reason=reason,
+                    skill=failing_skill,
+                    error_text=error_signature,
+                )
+
+                if replan_fingerprint == last_replan_fingerprint:
+                    consecutive_replan_hits += 1
+                else:
+                    last_replan_fingerprint = replan_fingerprint
+                    consecutive_replan_hits = 1
 
                 # For stage-boundary quality failures, roll back to the beginning of the
                 # poor-quality stage so draft artifacts do not leak into subsequent stages.
@@ -956,6 +1318,45 @@ Consider the current scene state when planning.
                                 f"{rollback_resp.get('error', 'unknown')}"
                             )
 
+                force_corrective_retry = False
+                loop_guard_hit = consecutive_replan_hits >= loop_guard_repeat_threshold
+                if loop_guard_hit:
+                    if not forced_retry_used.get(replan_fingerprint, False):
+                        forced_retry_used[replan_fingerprint] = True
+                        force_corrective_retry = True
+                    else:
+                        diagnostics = {
+                            "loop_guard": {
+                                "hit": True,
+                                "replan_fingerprint": replan_fingerprint,
+                                "replan_reason": reason,
+                                "failing_skill": failing_skill,
+                                "error_signature": self._build_error_signature(error_signature),
+                                "consecutive_hits": consecutive_replan_hits,
+                            }
+                        }
+                        raise self._create_interrupt(
+                            f"Loop guard interrupted repeated replans at step {step_id}",
+                            prompt,
+                            _save_path,
+                            plan=plan,
+                            steps=steps,
+                            step_results=step_results,
+                            current_index=i,
+                            allowed_skills=allowed_skills,
+                            diagnostics=diagnostics,
+                        )
+
+                feedback_detail["replan_reason"] = reason
+                feedback_detail["replan_fingerprint"] = replan_fingerprint
+                feedback_detail["loop_guard_hit"] = loop_guard_hit
+                feedback_detail["loop_guard_force_corrective"] = force_corrective_retry
+                print(
+                    "[VBF] "
+                    f"replan_reason={reason} "
+                    f"replan_fingerprint={replan_fingerprint} "
+                    f"loop_guard_hit={str(loop_guard_hit).lower()}"
+                )
                 print(
                     f"[VBF-Feedback] Triggering local replan at {step_id} "
                     f"(reason={reason}, from_index={replan_from_idx})"
@@ -968,6 +1369,8 @@ Consider the current scene state when planning.
                     allowed_skills=allowed_skills,
                     save_path=_save_path,
                     feedback_detail=feedback_detail,
+                    replan_fingerprint=replan_fingerprint,
+                    forced_corrective=force_corrective_retry,
                 )
                 steps = steps[:replan_from_idx] + new_steps
                 i = replan_from_idx
@@ -975,6 +1378,8 @@ Consider the current scene state when planning.
                 continue
 
             # Default advance for continue or unknown actions
+            last_replan_fingerprint = None
+            consecutive_replan_hits = 0
             i += 1
 
         print(f"[VBF-Feedback] Task completed: {len(step_results)} steps")
@@ -989,6 +1394,8 @@ Consider the current scene state when planning.
         allowed_skills: List[str],
         save_path: str,
         feedback_detail: Optional[Dict[str, Any]] = None,
+        replan_fingerprint: Optional[str] = None,
+        forced_corrective: bool = False,
     ) -> Tuple[Dict, List]:
         """Generate a new local plan from failure/checkpoint boundary."""
         import json
@@ -1000,6 +1407,17 @@ Consider the current scene state when planning.
         failed_step_id = failed_step.get("step_id", "unknown")
         failed_skill = failed_step.get("skill", "unknown")
         failed_result = step_results.get(failed_step_id, {})
+        failure_signature = (feedback_detail or {}).get("error", "")
+
+        corrective_block = ""
+        if forced_corrective:
+            corrective_block = f"""
+7) LOOP-GUARD: The prior replans repeated the same failure fingerprint: {replan_fingerprint}.
+   You MUST avoid repeating that failure mode.
+8) Keep this replan compact (<= 12 steps), prioritize object creation + valid refs first.
+9) If you need relationships (set_parent/constraints), ensure all referenced objects are created earlier in this same replan.
+10) Return plain JSON only, no markdown code fences.
+"""
 
         replan_prompt = f"""REPLAN FROM CURRENT SCENE STATE
 
@@ -1007,13 +1425,16 @@ User goal (must be satisfied semantically):
 {prompt}
 
 Current scene state:
-{scene.to_prompt_text()}
+{self._scene_to_prompt_text(scene, max_objects=20)}
 
 Current index: {fail_idx}
 Current step id: {failed_step_id}
 Current skill: {failed_skill}
 Current step result:
 {json.dumps(failed_result, indent=2, ensure_ascii=False)[:2000]}
+
+Current failure signature:
+{failure_signature[:1200]}
 
 Feedback trigger details:
 {json.dumps(feedback_detail or {}, indent=2, ensure_ascii=False)[:2000]}
@@ -1034,17 +1455,28 @@ Instructions:
 4) Return valid plan JSON with a `steps` array.
 5) For relationship steps (set_parent/constraints/material assignment), NEVER hardcode object names (e.g. "CameraModule"). Use `$ref` to previous step outputs.
 6) If an object is referenced, ensure it is explicitly created earlier in the same plan.
+{corrective_block}
 """
-        messages = adapter.format_messages(replan_prompt)
-        raw_plan = await self._adapter_call(messages)
+        replan_subset = allowed_skills[:140] if len(allowed_skills) > 140 else allowed_skills
+        raw_plan = await self._call_plan_with_format_retry(
+            adapter,
+            replan_prompt,
+            skills_subset=replan_subset,
+        )
         plan = normalize_plan(raw_plan)
         new_steps = validate_plan_structure(plan)
         return plan, new_steps
 
-    def _inject_scene_context(self, prompt: str, scene: SceneState) -> str:
+    def _inject_scene_context(
+        self,
+        prompt: str,
+        scene: SceneState,
+        max_objects: Optional[int] = None,
+    ) -> str:
         """Inject scene state into planning prompt."""
+        scene_text = self._scene_to_prompt_text(scene, max_objects=max_objects)
         return f"""Current Blender scene state:
-{scene.to_prompt_text()}
+{scene_text}
 
 --- USER REQUEST ---
 {prompt}

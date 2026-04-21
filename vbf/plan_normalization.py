@@ -7,7 +7,8 @@ to match the expected VBF plan schema, including:
 - on_success structure completion
 """
 
-from typing import Any, Dict, List, Set
+import re
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 
 # Parameter alias mapping for common LLM naming conventions
@@ -22,6 +23,92 @@ PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
 NON_EXECUTION_SKILLS: Set[str] = {
     "load_skill",
 }
+
+
+def _normalize_step_id(step_id: str) -> str:
+    if step_id.startswith("step_"):
+        return step_id[len("step_") :]
+    return step_id
+
+
+def _extract_ref_token(value: Any) -> str | None:
+    if isinstance(value, dict) and set(value.keys()) == {"$ref"}:
+        ref = value.get("$ref")
+        return ref if isinstance(ref, str) and ref.strip() else None
+    if isinstance(value, str) and value.startswith("$ref:"):
+        ref = value[len("$ref:") :].strip()
+        return ref if ref else None
+    return None
+
+
+def _iter_refs(value: Any, path: str = "args") -> Iterable[Tuple[str, str]]:
+    ref = _extract_ref_token(value)
+    if ref is not None:
+        yield path, ref
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield from _iter_refs(nested, f"{path}.{key}")
+    elif isinstance(value, list):
+        for idx, nested in enumerate(value):
+            yield from _iter_refs(nested, f"{path}[{idx}]")
+
+
+def validate_plan_references(plan: Dict[str, Any]) -> None:
+    """Validate that all $ref tokens use executable, backward-only step refs."""
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list):
+        return
+
+    all_step_ids: Set[str] = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        sid = step.get("step_id")
+        if isinstance(sid, str) and sid:
+            all_step_ids.add(_normalize_step_id(sid))
+
+    seen_step_ids: Set[str] = set()
+    ref_pattern = re.compile(r"^(?:step_)?([A-Za-z0-9_-]+)\.(?:data|result)\.[^.\s].*$")
+
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        sid = step.get("step_id")
+        sid_normalized = _normalize_step_id(sid) if isinstance(sid, str) and sid else None
+
+        args = step.get("args")
+        if not isinstance(args, (dict, list)):
+            if sid_normalized:
+                seen_step_ids.add(sid_normalized)
+            continue
+
+        for ref_path, ref in _iter_refs(args):
+            if ref.startswith("scene.") or "scene.objects[" in ref:
+                raise ValueError(
+                    f"invalid_ref_schema: step[{idx}] {ref_path}={ref!r}; "
+                    "only step_<id>.data.* or <id>.data.* refs are allowed"
+                )
+
+            match = ref_pattern.match(ref)
+            if not match:
+                raise ValueError(
+                    f"invalid_ref_schema: step[{idx}] {ref_path}={ref!r}; "
+                    "expected step_<id>.data.<field> or <id>.data.<field>"
+                )
+
+            ref_step_id = _normalize_step_id(match.group(1))
+            if ref_step_id not in all_step_ids:
+                raise ValueError(
+                    f"unknown_ref_step: step[{idx}] {ref_path} references {ref_step_id!r}"
+                )
+            if ref_step_id not in seen_step_ids:
+                raise ValueError(
+                    f"forward_ref_step: step[{idx}] {ref_path} references future step {ref_step_id!r}"
+                )
+
+        if sid_normalized:
+            seen_step_ids.add(sid_normalized)
 
 
 def extract_skills_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -144,6 +231,7 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     plan["steps"] = normalized_steps
     if not normalized_steps:
         raise ValueError("Plan has no executable steps after normalization")
+    validate_plan_references(plan)
 
     return plan
 
@@ -174,5 +262,7 @@ def validate_plan_structure(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     for idx, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ValueError(f"Plan step[{idx}] must be an object/dict")
+
+    validate_plan_references(plan)
 
     return steps

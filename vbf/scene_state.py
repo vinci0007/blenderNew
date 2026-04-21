@@ -138,8 +138,12 @@ class SceneState:
             "errors": self._errors,
         }
 
-    def to_prompt_text(self, incremental: bool = False,
-                       since_step_id: Optional[str] = None) -> str:
+    def to_prompt_text(
+        self,
+        incremental: bool = False,
+        since_step_id: Optional[str] = None,
+        max_objects: Optional[int] = None,
+    ) -> str:
         """Convert to text for LLM prompts.
 
         Args:
@@ -155,7 +159,10 @@ class SceneState:
             lines.append(f"(Changes since step: {since_step_id or 'unknown'})")
 
         objects = self.get_objects(only_modified=incremental)
-        lines.append(f'\nObjects ({len(objects)}):')
+        total_objects = len(objects)
+        if max_objects is not None and max_objects >= 0:
+            objects = objects[:max_objects]
+        lines.append(f'\nObjects ({total_objects}):')
 
         for obj in objects:
             info = f"- {obj['name']} ({obj['type']}) loc={obj['location']!r}"
@@ -164,6 +171,10 @@ class SceneState:
             if obj.get('_modified') and not incremental:
                 info += " [modified]"
             lines.append(info)
+
+        hidden = total_objects - len(objects)
+        if hidden > 0:
+            lines.append(f"- ... {hidden} more objects omitted")
 
         if self._statistics:
             lines.append(f"\nStatistics: {self._statistics}")
