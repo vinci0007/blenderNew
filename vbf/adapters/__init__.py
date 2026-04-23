@@ -10,7 +10,7 @@ Provides unified interface for:
 
 Usage:
     from vbf import get_adapter
-    from vbf.client import VBFClient
+    from vbf.app.client import VBFClient
 
     client = VBFClient()
     await client.connect()
@@ -23,24 +23,16 @@ Usage:
     plan = adapter.parse_response(llm_response)
 """
 
-import json
-import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from ..config_runtime import load_llm_section
+
 if TYPE_CHECKING:
-    from ..client import VBFClient
+    from ..app.client import VBFClient
 
-# Load model configurations
-_CONFIG_PATH = Path(__file__).parent.parent / "config" / "llm_config.json"
-
-
+# Load model configuration from vbf/config/config.json -> llm section.
 def _load_model_config() -> Dict[str, Any]:
-    """Load LLM configuration."""
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH, encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    return load_llm_section()
 
 
 _MODEL_CONFIG = _load_model_config()
@@ -138,10 +130,10 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "response_content_path": "choices[0].message.content",
     },
 
-    # Default: use llm_config.json settings
+    # Default: use llm section from config.json
     "default": {
         "provider": "openai_compat",
-        # API settings from llm_config.json
+        # API settings from config.json -> llm
         "base_url": _MODEL_CONFIG.get("base_url", "https://api.openai.com/v1"),
         "api_key": _MODEL_CONFIG.get("api_key"),  # Direct API key from config
         "api_key_env": ["VBF_LLM_API_KEY"],  # Fallback env var

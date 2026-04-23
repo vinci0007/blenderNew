@@ -2,7 +2,7 @@
 
 import pytest
 
-from vbf.style_templates import (
+from vbf.runtime.style_templates import (
     BevelSettings,
     TopologySettings,
     SubdivisionSettings,

@@ -51,7 +51,7 @@ ALL_PHASES = PHASE_1_STAGES + PHASE_2_STAGES + PHASE_3_STAGES + PHASE_4_STAGES +
 
 
 # -----------------------------------------------------------------------------
-# Helper: replicate the validation logic from vbf/client.py run_task
+# Helper: replicate the validation logic from vbf/app/client.py run_task
 # -----------------------------------------------------------------------------
 
 def _validate_stage_sequence(sequence: List[str], order_dict: Dict[str, int]) -> None:

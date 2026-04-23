@@ -20,22 +20,24 @@ Migration: All LLM calls now use the adapter via:
 """
 
 import asyncio
+import ast
 import json
 import os
 import re
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .jsonrpc_ws import JsonRpcWebSocketClient, JsonRpcError
-from .adapters import get_adapter
-from .llm_rate_limiter import call_llm_with_throttle
-from .plan_normalization import normalize_plan, validate_plan_structure
-from .vibe_protocol import resolve_refs
-from .task_state import TaskState, TaskInterruptedError
-from .scene_state import SceneState, FeedbackContext
-from .memory_manager import MemoryManager
+from ..transport.jsonrpc_ws import JsonRpcWebSocketClient, JsonRpcError
+from ..adapters import get_adapter
+from ..config_runtime import load_llm_section, load_project_paths
+from ..llm.rate_limiter import call_llm_with_throttle
+from ..core.plan_normalization import extract_skills_plan, normalize_plan, validate_plan_structure
+from ..core.vibe_protocol import resolve_refs
+from ..core.task_state import TaskState, TaskInterruptedError
+from ..core.scene_state import SceneState, FeedbackContext
+from ..runtime.memory_manager import MemoryManager
 
-from .style_templates import get_style_manager
+from ..runtime.style_templates import get_style_manager
 
 
 class VBFClient:
@@ -53,15 +55,14 @@ class VBFClient:
         self.port = int(port) if port is not None else int(os.getenv("VBF_WS_PORT", "8006"))
         self.blender_path = blender_path or os.getenv("BLENDER_PATH", "blender")
 
-        repo_root = os.path.dirname(os.path.dirname(__file__))
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         self.start_script_path = start_script_path or os.path.join(
             repo_root, "blender_provider", "start_vbf_blender.py"
         )
 
         self._ws = JsonRpcWebSocketClient(f"ws://{self.host}:{self.port}")
-        self._default_save_path = os.path.join(
-            os.path.dirname(__file__), "config", "task_state.json"
-        )
+        self._runtime_paths = load_project_paths()
+        self._default_save_path = self._runtime_paths["task_state_file"]
 
         # Initialize memory manager
         memory_threshold = memory_limit_mb or int(os.getenv("VBF_MEMORY_THRESHOLD_MB", "512"))
@@ -79,19 +80,16 @@ class VBFClient:
     def _is_llm_enabled(self) -> bool:
         """Check if LLM is configured."""
         try:
-            from .llm_openai_compat import load_openai_compat_config
+            from ..llm.openai_compat import load_openai_compat_config
             cfg = load_openai_compat_config()
             return cfg is not None and cfg.use_llm
         except Exception:
             return False
 
     def _load_adapter_config(self) -> Optional[Dict]:
-        """Load raw config dict for adapter from llm_config.json."""
-        config_path = os.path.join(os.path.dirname(__file__), "config", "llm_config.json")
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return None
+        """Load llm config section for adapter initialization."""
+        llm_config = load_llm_section()
+        return llm_config or None
 
     def _get_llm_model_name(self) -> str:
         """Determine which model key to use in get_adapter()."""
@@ -156,7 +154,7 @@ class VBFClient:
     def _record_llm_parse_failure(self, payload: Dict[str, Any]) -> None:
         """Persist the latest parse failure with full context for debugging."""
         try:
-            save_path = os.path.join(os.path.dirname(__file__), "config", "last_gen_fail.txt")
+            save_path = self._runtime_paths["last_gen_fail_file"]
             content = {
                 "error": payload.get("error"),
                 "parse_stage": payload.get("parse_stage"),
@@ -179,9 +177,31 @@ class VBFClient:
     ) -> None:
         """Persist non-parse plan failures (e.g. missing steps wrappers)."""
         try:
-            save_path = os.path.join(os.path.dirname(__file__), "config", "last_plan_fail.txt")
+            save_path = self._runtime_paths["last_plan_fail_file"]
             payload = {
                 "error": error_message,
+                "stage": stage,
+                "raw_plan_type": type(raw_plan).__name__,
+                "raw_plan": raw_plan,
+            }
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _snapshot_payload(payload: Any) -> Any:
+        """Best-effort deep snapshot to preserve pre-normalization raw payload."""
+        try:
+            return copy.deepcopy(payload)
+        except Exception:
+            return payload
+
+    def _record_pre_normalize_plan_snapshot(self, raw_plan: Any, stage: str) -> None:
+        """Persist the latest raw plan exactly before normalize_plan()."""
+        try:
+            save_path = self._runtime_paths["last_plan_raw_file"]
+            payload = {
                 "stage": stage,
                 "raw_plan_type": type(raw_plan).__name__,
                 "raw_plan": raw_plan,
@@ -558,8 +578,40 @@ class VBFClient:
             "- Return plain JSON only (no markdown fences).\n"
             "- Output must be a single JSON object.\n"
             "- Keep the same user intent; do not change task semantics.\n"
-            "- Include top-level `steps` array with executable Blender skills."
+            "- Include top-level `steps` array with executable Blender skills.\n"
+            "- `steps` must be a non-empty JSON array.\n"
+            "- Do NOT return `tool_calls`, `tool_results`, or `load_skill` helper payloads."
         )
+
+    @staticmethod
+    def _build_nonempty_steps_rescue_prompt(prompt: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "CRITICAL RECOVERY MODE:\n"
+            "- Previous responses failed because `steps` was empty or non-executable.\n"
+            "- You MUST return at least 3 executable Blender skill steps.\n"
+            "- Return a single JSON object with top-level `steps` array.\n"
+            "- Each step must include: step_id, skill, args.\n"
+            "- Do NOT return tool_calls/tool_results/load_skill.\n"
+            "- If uncertain, start from create_primitive and continue with valid follow-up steps."
+        )
+
+    @staticmethod
+    def _has_nonempty_steps(payload: Any) -> bool:
+        extracted = extract_skills_plan(payload)
+        if not isinstance(extracted, dict):
+            return False
+        steps = extracted.get("steps")
+        return isinstance(steps, list) and len(steps) > 0
+
+    @staticmethod
+    def _is_tool_calls_payload(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        tool_calls = payload.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return False
+        return all(isinstance(call, dict) and "name" in call for call in tool_calls)
 
     async def _call_plan_with_format_retry(
         self,
@@ -567,7 +619,7 @@ class VBFClient:
         prompt: str,
         skills_subset: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Call planner once, then retry once with strict-format constraints on parse errors."""
+        """Call planner once, then retry once on parse/shape format failures."""
         def _format(p: str) -> List[Dict[str, Any]]:
             try:
                 return adapter.format_messages(p, skills_subset=skills_subset)
@@ -576,7 +628,37 @@ class VBFClient:
                 return adapter.format_messages(p)
 
         try:
-            return await self._adapter_call(_format(prompt))
+            response = await self._adapter_call(_format(prompt))
+            # Some providers return valid JSON wrappers that still do not contain
+            # executable steps (for example {"result":{"message":"no steps"}}).
+            # Treat this as a format-shape failure and issue one strict retry.
+            if self._has_nonempty_steps(response):
+                return response
+            print("[VBF] parse_stage=plan_shape retry_mode=structured_json_retry")
+            retry_prompt = self._build_json_format_retry_prompt(prompt)
+            if self._is_tool_calls_payload(response):
+                # Some models emit tool-calling helper payloads as final JSON content.
+                # For retry, force tools-off mode when adapter supports it so the model
+                # must return a concrete executable steps plan.
+                allow_tools_prev = getattr(adapter, "_allow_tools", None)
+                if isinstance(allow_tools_prev, bool):
+                    adapter._allow_tools = False
+                    try:
+                        retry_response = await self._adapter_call(_format(retry_prompt))
+                    finally:
+                        adapter._allow_tools = allow_tools_prev
+                else:
+                    retry_response = await self._adapter_call(_format(retry_prompt))
+            else:
+                retry_response = await self._adapter_call(_format(retry_prompt))
+
+            if self._has_nonempty_steps(retry_response):
+                return retry_response
+
+            # Last-resort rescue for empty/non-executable step payloads.
+            print("[VBF] parse_stage=plan_shape retry_mode=nonempty_steps_rescue")
+            rescue_prompt = self._build_nonempty_steps_rescue_prompt(prompt)
+            return await self._adapter_call(_format(rescue_prompt))
         except ValueError as e:
             if not self._is_llm_parse_error(e):
                 raise
@@ -778,6 +860,102 @@ class VBFClient:
                         f"step[{idx}] skill={skill} arg={arg_name} "
                         f"expected={expected_type} actual={self._guess_python_type_name(arg_value)}"
                     )
+
+    @staticmethod
+    def _extract_plan_gate_missing_required(
+        message: str,
+    ) -> Optional[Tuple[int, str, str]]:
+        match = re.search(
+            r"plan_gate_missing_required:\s*step\[(\d+)\]\s*skill=([^\s]+)\s*missing arg=([^\s]+)",
+            message or "",
+        )
+        if not match:
+            return None
+        return int(match.group(1)), match.group(2), match.group(3)
+
+    def _auto_fix_known_plan_gate_issue(self, plan: Dict[str, Any], error_message: str) -> bool:
+        """Best-effort local auto-fix for known plan-gate failures."""
+        parsed = self._extract_plan_gate_missing_required(error_message)
+        steps = plan.get("steps")
+        if not isinstance(steps, list):
+            return False
+
+        if parsed:
+            idx, skill, missing_arg = parsed
+            if not (0 <= idx < len(steps)):
+                return False
+
+            # Common LLM failure on hard-surface prompts: emits mark_edge_crease
+            # without edges payload. This step is optional polish, so safely prune.
+            if skill == "mark_edge_crease" and missing_arg == "edges":
+                removed = steps.pop(idx)
+                step_id = removed.get("step_id", f"step[{idx}]")
+                print(
+                    "[VBF] plan_gate_autofix "
+                    f"action=drop_step reason=missing_edges skill=mark_edge_crease step_id={step_id}"
+                )
+                return True
+
+            # Common LLM omission on minimal prompts.
+            if skill == "create_primitive" and missing_arg == "primitive_type":
+                step = steps[idx]
+                args = step.get("args")
+                if isinstance(args, dict):
+                    args["primitive_type"] = "cube"
+                    print(
+                        "[VBF] plan_gate_autofix "
+                        "action=fill_default skill=create_primitive arg=primitive_type value=cube"
+                    )
+                    return True
+
+        unknown_match = re.search(
+            r"plan_gate_unknown_args:\s*step\[(\d+)\]\s*skill=([^\s]+)\s*unknown=(\[[^\]]*\])",
+            error_message or "",
+        )
+        if unknown_match:
+            idx = int(unknown_match.group(1))
+            if not (0 <= idx < len(steps)):
+                return False
+            step = steps[idx]
+            args = step.get("args")
+            if not isinstance(args, dict):
+                return False
+            unknown_payload = unknown_match.group(3)
+            try:
+                unknown_args = ast.literal_eval(unknown_payload)
+            except Exception:
+                unknown_args = []
+            if not isinstance(unknown_args, list):
+                return False
+            removed = [name for name in unknown_args if isinstance(name, str) and name in args]
+            for name in removed:
+                args.pop(name, None)
+            if removed:
+                print(
+                    "[VBF] plan_gate_autofix "
+                    f"action=drop_unknown_args step_index={idx} removed={removed}"
+                )
+                return True
+
+        return False
+
+    def _validate_plan_with_schema_autofix(
+        self,
+        plan: Dict[str, Any],
+        adapter: Any,
+        allowed_skills: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Validate plan against skill schemas, with targeted auto-fix retries."""
+        steps = validate_plan_structure(plan)
+        for _ in range(4):
+            try:
+                self._validate_plan_with_skill_schemas(plan, adapter, allowed_skills)
+                return steps
+            except ValueError as e:
+                if not self._auto_fix_known_plan_gate_issue(plan, str(e)):
+                    raise
+                steps = validate_plan_structure(plan)
+        raise ValueError("plan_gate_autofix_exhausted")
 
     @staticmethod
     def _is_recoverable_plan_error(message: str) -> bool:
@@ -1095,21 +1273,30 @@ Current scene state:
 Completed steps:
 {json.dumps(step_results, indent=2, ensure_ascii=False)}
 
-Please generate a new plan starting from step "{from_step_id}".
+        Please generate a new plan starting from step "{from_step_id}".
 Consider the current scene state when planning.
 """
+        raw_plan: Any = None
+        raw_plan_snapshot: Any = None
         try:
             raw_plan = await self._call_plan_with_format_retry(
                 adapter,
                 replan_prompt,
                 skills_subset=allowed_skills,
             )
+            raw_plan_snapshot = self._snapshot_payload(raw_plan)
+            self._record_pre_normalize_plan_snapshot(raw_plan_snapshot, stage="request_replan")
             plan = normalize_plan(raw_plan)
             steps = validate_plan_structure(plan)
             if not steps:
                 raise ValueError("No steps in replan")
             return plan, steps
         except ValueError as e:
+            self._record_plan_shape_failure(
+                str(e),
+                raw_plan_snapshot if raw_plan_snapshot is not None else raw_plan,
+                stage="request_replan",
+            )
             raise self._create_interrupt(f"Replan failed: {e}", prompt, save_path, cause=e)
 
     # --- Main Execution with Layer 2: Enhanced Recovery ---
@@ -1336,6 +1523,7 @@ Consider the current scene state when planning.
                     continue
                 seen_subset_keys.add(subset_key)
                 raw_plan: Any = None
+                raw_plan_snapshot: Any = None
 
                 print(
                     "[VBF] planning_subset "
@@ -1348,32 +1536,44 @@ Consider the current scene state when planning.
                         prompt,
                         skills_subset=skill_subset,
                     )
+                    raw_plan_snapshot = self._snapshot_payload(raw_plan)
+                    self._record_pre_normalize_plan_snapshot(raw_plan_snapshot, stage="plan_round")
                     plan = normalize_plan(raw_plan)
-                    steps = validate_plan_structure(plan)
-                    self._validate_plan_with_skill_schemas(plan, adapter, skill_subset)
+                    steps = self._validate_plan_with_schema_autofix(plan, adapter, skill_subset)
                     return plan, steps
                 except ValueError as e:
                     last_error = e
-                    self._record_plan_shape_failure(str(e), raw_plan, stage="plan_round")
+                    self._record_plan_shape_failure(
+                        str(e),
+                        raw_plan_snapshot if raw_plan_snapshot is not None else raw_plan,
+                        stage="plan_round",
+                    )
                     if not self._is_recoverable_plan_error(str(e)):
                         raise
                     repair_prompt = self._build_plan_repair_prompt(prompt, str(e))
                     repaired_raw_plan: Any = None
+                    repaired_raw_plan_snapshot: Any = None
                     try:
                         repaired_raw_plan = await self._call_plan_with_format_retry(
                             adapter,
                             repair_prompt,
                             skills_subset=skill_subset,
                         )
+                        repaired_raw_plan_snapshot = self._snapshot_payload(repaired_raw_plan)
+                        self._record_pre_normalize_plan_snapshot(
+                            repaired_raw_plan_snapshot,
+                            stage="plan_round_repair",
+                        )
                         plan = normalize_plan(repaired_raw_plan)
-                        steps = validate_plan_structure(plan)
-                        self._validate_plan_with_skill_schemas(plan, adapter, skill_subset)
+                        steps = self._validate_plan_with_schema_autofix(plan, adapter, skill_subset)
                         return plan, steps
                     except ValueError as repair_err:
                         last_error = repair_err
                         self._record_plan_shape_failure(
                             str(repair_err),
-                            repaired_raw_plan,
+                            repaired_raw_plan_snapshot
+                            if repaired_raw_plan_snapshot is not None
+                            else repaired_raw_plan,
                             stage="plan_round_repair",
                         )
                         if not self._is_recoverable_plan_error(str(repair_err)):
@@ -1414,8 +1614,8 @@ Consider the current scene state when planning.
         3. Trigger LLM analysis at stage boundaries
         4. Replan locally from failure point when quality/validation fails
         """
-        from .feedback_control import ClosedLoopControl
-        from .geometry_capture import IncrementalSceneCapture, CaptureLevel
+        from ..feedback.control import ClosedLoopControl
+        from ..feedback.geometry_capture import IncrementalSceneCapture, CaptureLevel
 
         await self.ensure_connected()
 
@@ -1722,18 +1922,26 @@ Instructions:
 
         last_error: Optional[Exception] = None
         for subset in subset_candidates:
+            raw_plan: Any = None
+            raw_plan_snapshot: Any = None
             try:
                 raw_plan = await self._call_plan_with_format_retry(
                     adapter,
                     replan_prompt,
                     skills_subset=subset,
                 )
+                raw_plan_snapshot = self._snapshot_payload(raw_plan)
+                self._record_pre_normalize_plan_snapshot(raw_plan_snapshot, stage="feedback_replan")
                 plan = normalize_plan(raw_plan)
-                new_steps = validate_plan_structure(plan)
-                self._validate_plan_with_skill_schemas(plan, adapter, subset)
+                new_steps = self._validate_plan_with_schema_autofix(plan, adapter, subset)
                 return plan, new_steps
             except ValueError as e:
                 last_error = e
+                self._record_plan_shape_failure(
+                    str(e),
+                    raw_plan_snapshot if raw_plan_snapshot is not None else raw_plan,
+                    stage="feedback_replan",
+                )
                 if not self._is_recoverable_plan_error(str(e)):
                     raise
                 continue

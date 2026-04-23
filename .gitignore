@@ -15,8 +15,7 @@ wheels/
 /.hypothesis
 
 # VBF secrets & runtime state
-vbf/config/llm_config.json
-vbf/config/task_state.json
+vbf/config/config.json
 assets/blender_python_reference_5_1.zip
 /assets/blender_python_reference_5_1
 docs/VBF_SKILLS_PATTERN_ANALYSIS.md
@@ -32,13 +31,18 @@ SKILL_EXTRACTED.md
 docs/覆盖率.md
 find-buddy.bat
 /tests/.hypothesis
-tests/a.py
+tests/task_tmp/*
+!tests/task_tmp/.gitkeep
+!tests/task_tmp/README.md
 CLAUDE.md.bak
 CLAUDE.md
 .claude/settings.local.json
 TASK_STATE.md
 PHASE2_COMPLETION_REPORT.md
-/vbf/config/llm_cache
+vbf/cache/*
+!vbf/cache/.gitkeep
+vbf/logs/*
+!vbf/logs/.gitkeep
 add_feedback_patch.py
 reference/youtube-mcp-server/
 docs/youtube_analysis_v2.md
@@ -51,10 +55,8 @@ reference/blender_python_reference_5_1.zip
 docs/archived/TASK_STATE_SNAPSHOT_2026-04-13.md
 docs/unregistered_skills/LOW_FREQUENCY_API_REFERENCE.md
 docs/archived/architecture_analysis.md
-vbf/config/llm_config.json.copy
+vbf/config/config.json.copy
 TASK_STATE_SNAPSHOT.md
-vbf/config/last_gen_fail.txt
-vbf/config/last_plan_fail.txt
 /vbf/agent/memory/test-history
 /vbf/agent/memory/test-msgs
 /vbf/agent/memory/test-prefs
@@ -68,3 +70,8 @@ assets/prompt_test copy.md
 tests/test_client_plan_retry.py
 tests/test_openai_compat_adapter_response_format.py
 tests/test_plan_normalization.py
+/tests/task_tmp
+/.tmp_runtime_cfg
+/vbf/logs
+docs/to_do_plan.md
+docs/to_do_plan.md

@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from vbf.client import VBFClient
-from vbf.jsonrpc_ws import JsonRpcError
+from vbf.app.client import VBFClient
+from vbf.transport.jsonrpc_ws import JsonRpcError
 
 
 @pytest.mark.asyncio

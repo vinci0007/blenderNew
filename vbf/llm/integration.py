@@ -8,9 +8,9 @@ import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-from .llm_openai_compat import OpenAICompatLLM, OpenAICompatConfig, load_openai_compat_config
-from .vibe_protocol import merge_step_results_for_prompt
-from .plan_normalization import normalize_plan, validate_plan_structure
+from .openai_compat import OpenAICompatLLM, OpenAICompatConfig, load_openai_compat_config
+from ..core.vibe_protocol import merge_step_results_for_prompt
+from ..core.plan_normalization import normalize_plan, validate_plan_structure
 
 
 def load_llm() -> Optional[OpenAICompatLLM]:
@@ -58,8 +58,8 @@ async def call_llm_json(
     Returns:
         Parsed JSON response as dict
     """
-    from .llm_cache import get_cache
-    from .llm_rate_limiter import call_llm_with_throttle
+    from .cache import get_cache
+    from .rate_limiter import call_llm_with_throttle
 
     cache = get_cache() if use_cache else None
 
@@ -293,7 +293,7 @@ async def generate_skill_plan(
     if llm is None:
         raise ValueError(
             "LLM is not configured. Please set VBF_LLM_API_KEY and VBF_LLM_BASE_URL "
-            "or configure vbf/config/llm.json"
+            "or configure vbf/config/config.json"
         )
 
     skill_schemas = await describe_skills_func(allowed_skills)

@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from collections import deque
+from ..config_runtime import load_llm_section
 
 
 @dataclass
@@ -18,11 +19,11 @@ class LLM_API_Throttle_Config:
     This controls how many concurrent LLM API calls can be made,
     how many calls per minute are allowed, and retry behavior.
     """
-    max_concurrent_calls: int = 3  # 同时最多N个LLM调用在进行
-    max_calls_per_minute: int = 20  # 每分钟最多N个调用
-    call_timeout_seconds: float = 60.0  # 单次LLM调用超时时间
+    max_concurrent_calls: int = 3  # 鍚屾椂鏈€澶歂涓狶LM璋冪敤鍦ㄨ繘琛?
+    max_calls_per_minute: int = 20  # 姣忓垎閽熸渶澶歂涓皟鐢?
+    call_timeout_seconds: float = 60.0  # 鍗曟LLM璋冪敤瓒呮椂鏃堕棿
 
-    # 失败重试配置
+    # 澶辫触閲嶈瘯閰嶇疆
     retry_on_failure: Dict[str, Any] = field(default_factory=lambda: {
         "max_attempts": 3,
         "delay_between_attempts_seconds": 1.0
@@ -30,7 +31,7 @@ class LLM_API_Throttle_Config:
 
     @classmethod
     def from_config_dict(cls, config: Dict[str, Any]) -> "LLM_API_Throttle_Config":
-        """Create config from dict loaded from vbf/config/llm.json.
+        """Create config from dict loaded from vbf/config/config.json.
 
         Looks for key: "llm_api_throttling"
         """
@@ -152,7 +153,7 @@ class RateLimiter:
                     else:
                         raise TimeoutError(
                             f"LLM call timed out after {self.config.call_timeout_seconds}s. "
-                            "Consider increasing call_timeout_seconds in llm_config.json."
+                            "Consider increasing llm_api_throttling.call_timeout_seconds in config.json."
                         ) from None
                 except Exception as e:
                     # Other errors: check if retryable (rate limit / server errors)
@@ -206,7 +207,7 @@ class RateLimiter:
 class LLMRateLimiter:
     """Singleton-style rate limiter for LLM operations.
 
-    Loads configuration from vbf/config/llm.json and provides
+    Loads configuration from vbf/config/config.json and provides
 global rate limiting across all LLM calls.
     """
 
@@ -247,25 +248,9 @@ def load_throttle_config() -> Optional[LLM_API_Throttle_Config]:
     Returns:
         LLM_API_Throttle_Config or None if file not found
     """
-    import json
-    import os
-
-    config_paths = [
-        os.path.join(os.path.dirname(__file__), "config", "llm_config.json"),
-        os.path.join("vbf", "config", "llm_config.json"),
-    ]
-
-    for path in config_paths:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    if "llm_api_throttling" in config:
-                        return LLM_API_Throttle_Config.from_config_dict(config)
-            except (json.JSONDecodeError, IOError):
-                continue
-
-    # Return default config
+    llm_config = load_llm_section()
+    if "llm_api_throttling" in llm_config:
+        return LLM_API_Throttle_Config.from_config_dict(llm_config)
     return LLM_API_Throttle_Config()
 
 
@@ -286,7 +271,7 @@ async def call_llm_with_throttle(coro_factory: callable, *args, **kwargs) -> Any
     """Convenience function to call LLM with throttling.
 
     Usage:
-        from vbf.llm_rate_limiter import call_llm_with_throttle
+        from vbf.llm.rate_limiter import call_llm_with_throttle
 
         response = await call_llm_with_throttle(
             llm.chat_json,

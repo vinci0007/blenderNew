@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import json
 
-from .scene_state import SceneState
+from ..core.scene_state import SceneState
 
 
 @dataclass

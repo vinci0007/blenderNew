@@ -29,6 +29,7 @@ from .adapters import (
     list_supported_models,
     SUPPORTED_MODELS,
 )
+from .app.client import VBFClient
 
 __version__ = "2.2.0"
 
@@ -40,4 +41,5 @@ __all__ = [
     "get_adapter",
     "list_supported_models",
     "SUPPORTED_MODELS",
+    "VBFClient",
 ]

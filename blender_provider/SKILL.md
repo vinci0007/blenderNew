@@ -1,10 +1,10 @@
 ---
 name: Vibe-Blender-Flow Skills (VBF)
-description: Execute Blender modeling actions via 290+ pre-registered High-Level Skills over JSON-RPC. Includes full coverage for modeling, UV, materials, animation, armature, particles, physics, geometry nodes, sculpting, rendering, and compositing.
+description: Execute Blender modeling actions via 357 pre-registered High-Level Skills over JSON-RPC. Includes full coverage for modeling, UV, materials, animation, armature, particles, physics, geometry nodes, sculpting, rendering, and compositing.
 metadata:
 {
-  "version": "2.0.0",
-  "skills_count": 290,
+  "version": "2.2.0",
+  "skills_count": 357,
   "modules_count": 32,
   "blender_version": "4.0+ / 5.x",
   "openai_compat_planner": {

@@ -57,7 +57,7 @@ VBF 通过三个核心原则实现自然语言驱动的 Blender 建模：
 │   ├─ openai_compat_adapter.py  统一 OpenAI 兼容适配器
 │   └─ skill_registry.py  SkillRegistry 单例（全局缓存）
 ├─ client.py              VBFClient（四层控制系统）
-├─ config/llm_config.json LLM 配置
+├─ config/config.json LLM 配置
 ├─ llm_rate_limiter.py    速率限制（429 指数退避重试）
 └─ ...
 
@@ -96,7 +96,7 @@ uv run python -m vbf --prompt "create a retro radio"
 uv run python -m vbf --prompt "create a smartphone" --style hard_surface_realistic
 
 # 从断点恢复
-uv run python -m vbf --prompt "continue" --resume vbf/config/task_state.json
+uv run python -m vbf --prompt "continue" --resume vbf/cache/task_state.json
 ```
 
 ### Python API
@@ -114,7 +114,7 @@ async def main():
     # 从断点恢复
     result = await client.run_task(
         "create a detailed spaceship",
-        resume_state_path="vbf/config/task_state.json"
+        resume_state_path="vbf/cache/task_state.json"
     )
 
 asyncio.run(main())
@@ -137,20 +137,33 @@ asyncio.run(main())
 
 ## LLM 配置
 
-创建 `vbf/config/llm_config.json`:
+创建 `vbf/config/config.json`:
 
 ```json
 {
-  "use_llm": true,
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "YOUR_KEY",
-  "model": "glm-4.7-flash",
-  "temperature": 0.2,
-  "llm_api_throttling": {
-    "max_concurrent_calls": 1,
-    "max_calls_per_minute": 20,
-    "call_timeout_seconds": 120,
-    "retry_on_failure": { "max_attempts": 3 }
+  "project": {
+    "paths": {
+      "cache_dir": "vbf/cache",
+      "logs_dir": "vbf/logs",
+      "task_state_file": "vbf/cache/task_state.json",
+      "last_gen_fail_file": "vbf/cache/last_gen_fail.txt",
+      "last_plan_fail_file": "vbf/cache/last_plan_fail.txt",
+      "last_plan_raw_file": "vbf/cache/last_plan_raw.txt",
+      "llm_cache_dir": "vbf/cache/llm_cache"
+    }
+  },
+  "llm": {
+    "use_llm": true,
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "YOUR_KEY",
+    "model": "glm-4.7-flash",
+    "temperature": 0.2,
+    "llm_api_throttling": {
+      "max_concurrent_calls": 1,
+      "max_calls_per_minute": 20,
+      "call_timeout_seconds": 120,
+      "retry_on_failure": { "max_attempts": 3 }
+    }
   }
 }
 ```
@@ -194,9 +207,9 @@ uv run pytest tests/ -v
 | 问题 | 解决方案 |
 |------|----------|
 | WS 连接失败 | 验证 Blender 插件运行中（N 面板 → VBF → 状态 "Running"） |
-| LLM 未配置 | 编辑 `vbf/config/llm_config.json` 填入 API 凭证 |
+| LLM 未配置 | 编辑 `vbf/config/config.json` 填入 API 凭证 |
 | 429 速率限制 | 自动指数退避重试 |
-| 从断点恢复 | `vbf --prompt "..." --resume vbf/config/task_state.json` |
+| 从断点恢复 | `vbf --prompt "..." --resume vbf/cache/task_state.json` |
 
 ---
 

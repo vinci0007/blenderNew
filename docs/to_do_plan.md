@@ -1,38 +1,35 @@
-# VBF 建模流程改进计划
+# VBF 寤烘ā娴佺▼鏀硅繘璁″垝
 
-**创建时间**: 2026-04-12
-**分析来源**: 基于 Blender 专业建模流程知识
-**状态**: 待实施
+**鍒涘缓鏃堕棿**: 2026-04-12
+**鍒嗘瀽鏉ユ簮**: 鍩轰簬 Blender 涓撲笟寤烘ā娴佺▼鐭ヨ瘑
+**鐘舵€?*: 寰呭疄鏂?
+---
+
+## 闂鎬荤粨
+
+褰撳墠 VBF 9 闃舵寤烘ā娴佺▼瀛樺湪鐨勪笁澶ф牳蹇冮棶棰橈細
+
+1. **闃舵瀹氫箟涓庝笓涓氭祦绋嬩笉绗?* - 鏈闈炴爣鍑嗭紝椤哄簭鍙紭鍖?2. **缂哄皯鐢ㄦ埛鍙嶉寰幆** - 褰撳墠涓?涓€娆℃€?鐢熸垚妯″紡
+3. **缂哄皯鍥惧儚杈撳叆鏀寔** - 鏃犳硶鍒嗘瀽鐢ㄦ埛鎻愪緵鐨勫弬鑰冨浘
 
 ---
 
-## 问题总结
+## 瀹炴柦璁″垝
 
-当前 VBF 9 阶段建模流程存在的三大核心问题：
+### 瀹炴柦 A: 閲嶆瀯 Stage 娴佺▼ (P0 - 楂樹紭鍏堢骇)
 
-1. **阶段定义与专业流程不符** - 术语非标准，顺序可优化
-2. **缺少用户反馈循环** - 当前为"一次性"生成模式
-3. **缺少图像输入支持** - 无法分析用户提供的参考图
+**鐩爣**: 灏?9 闃舵鎵╁睍涓烘爣鍑嗕笓涓氬缓妯℃祦绋?
+**棰勮宸ユ湡**: 2-4 灏忔椂
 
----
+**鏂囦欢淇敼**:
+- `vbf/app/client.py` - 淇敼 `stage_order` 瀹氫箟
+- `vbf/llm_integration.py` - 鏇存柊 LLM Prompt schema
+- `blender_provider/SKILL.md` - 鏇存柊鏂囨。
 
-## 实施计划
-
-### 实施 A: 重构 Stage 流程 (P0 - 高优先级)
-
-**目标**: 将 9 阶段扩展为标准专业建模流程
-
-**预计工期**: 2-4 小时
-
-**文件修改**:
-- `vbf/client.py` - 修改 `stage_order` 定义
-- `vbf/llm_integration.py` - 更新 LLM Prompt schema
-- `blender_provider/SKILL.md` - 更新文档
-
-**具体改动**:
+**鍏蜂綋鏀瑰姩**:
 
 ```python
-# 当前 (vbf/client.py:126-134)
+# 褰撳墠 (vbf/app/client.py:126-134)
 stage_order = {
     "discover": 0,
     "blockout": 1,
@@ -45,69 +42,56 @@ stage_order = {
     "finalize": 8,
 }
 
-# 重构为专业流程
-PROFESSIONAL_STAGE_ORDER = {
+# 閲嶆瀯涓轰笓涓氭祦绋?PROFESSIONAL_STAGE_ORDER = {
     # Phase 1: Concept
-    "reference_analysis": 0,    # 分析用户输入（原 discover）
-    "mood_board": 1,            # NEW: 情绪板创建
-    "style_definition": 2,      # NEW: 风格确立
+    "reference_analysis": 0,    # 鍒嗘瀽鐢ㄦ埛杈撳叆锛堝師 discover锛?    "mood_board": 1,            # NEW: 鎯呯华鏉垮垱寤?    "style_definition": 2,      # NEW: 椋庢牸纭珛
     
     # Phase 2: Blocking
-    "primitive_blocking": 3,    # 粗块创建（原 blockout）
-    "silhouette_validation": 4, # NEW: 轮廓验证
-    "proportion_check": 5,      # NEW: 比例确认
+    "primitive_blocking": 3,    # 绮楀潡鍒涘缓锛堝師 blockout锛?    "silhouette_validation": 4, # NEW: 杞粨楠岃瘉
+    "proportion_check": 5,      # NEW: 姣斾緥纭
     
     # Phase 3: Structure
-    "topology_prep": 6,         # NEW: 拓扑准备
-    "edge_flow": 7,             # NEW: 边流控制
-    "boolean_operations": 8,    # Boolean切割（保留）
+    "topology_prep": 6,         # NEW: 鎷撴墤鍑嗗
+    "edge_flow": 7,             # NEW: 杈规祦鎺у埗
+    "boolean_operations": 8,    # Boolean鍒囧壊锛堜繚鐣欙級
     
     # Phase 4: Detail
-    "bevel_chamfer": 9,         # 倒角（先于细节）
-    "micro_detailing": 10,      # 微观细节（原 detail）
-    "high_poly_finalize": 11,   # NEW: 高模最终化
+    "bevel_chamfer": 9,         # 鍊掕锛堝厛浜庣粏鑺傦級
+    "micro_detailing": 10,      # 寰缁嗚妭锛堝師 detail锛?    "high_poly_finalize": 11,   # NEW: 楂樻ā鏈€缁堝寲
     
     # Phase 5: Polish
-    "normal_baking": 12,        # 标准术语（原 normal_fix）
-    "uv_prep": 13,              # NEW: UV准备
-    "material_prep": 14,        # 材质准备（原 accessories 重命名）
+    "normal_baking": 12,        # 鏍囧噯鏈锛堝師 normal_fix锛?    "uv_prep": 13,              # NEW: UV鍑嗗
+    "material_prep": 14,        # 鏉愯川鍑嗗锛堝師 accessories 閲嶅懡鍚嶏級
     
     # Phase 6: Finish
-    "material_assignment": 15,  # 材质分配（原 material）
-    "lighting_check": 16,       # NEW: 灯光预览
-    "finalize": 17              # 最终导出（保留）
-}
+    "material_assignment": 15,  # 鏉愯川鍒嗛厤锛堝師 material锛?    "lighting_check": 16,       # NEW: 鐏厜棰勮
+    "finalize": 17              # 鏈€缁堝鍑猴紙淇濈暀锛?}
 ```
 
-**验收标准**:
-- [ ] stage_order 更新为专业术语
-- [ ] 所有测试通过 (tests/test_stage_system.py)
-- [ ] LLM Prompt schema 更新（9阶段 → 18阶段）
-- [ ] 文档 README.md 更新
+**楠屾敹鏍囧噯**:
+- [ ] stage_order 鏇存柊涓轰笓涓氭湳璇?- [ ] 鎵€鏈夋祴璇曢€氳繃 (tests/test_stage_system.py)
+- [ ] LLM Prompt schema 鏇存柊锛?闃舵 鈫?18闃舵锛?- [ ] 鏂囨。 README.md 鏇存柊
 
 ---
 
-### 实施 B: 增加用户反馈循环 (P0 - 高优先级)
+### 瀹炴柦 B: 澧炲姞鐢ㄦ埛鍙嶉寰幆 (P0 - 楂樹紭鍏堢骇)
 
-**目标**: 在关键节点提供中途预览和用户确认
+**鐩爣**: 鍦ㄥ叧閿妭鐐规彁渚涗腑閫旈瑙堝拰鐢ㄦ埛纭
 
-**预计工期**: 4-6 小时
+**棰勮宸ユ湡**: 4-6 灏忔椂
 
-**新增模块**:
-- `vbf/feedback_loop.py` - 反馈循环控制器
-- `vbf/feedback_ui.py` - 预览和交互界面
-
-**关键节点**:
+**鏂板妯″潡**:
+- `vbf/feedback_loop.py` - 鍙嶉寰幆鎺у埗鍣?- `vbf/feedback_ui.py` - 棰勮鍜屼氦浜掔晫闈?
+**鍏抽敭鑺傜偣**:
 ```python
 FEEDBACK_CHECKPOINTS = [
-    ("after_silhouette", 20),      # 轮廓确认
-    ("after_blocking", 35),        # 比例确认
-    ("after_bevel", 60),             # 细节程度确认
-    ("before_material", 85),        # 最终高模确认
-]
+    ("after_silhouette", 20),      # 杞粨纭
+    ("after_blocking", 35),        # 姣斾緥纭
+    ("after_bevel", 60),             # 缁嗚妭绋嬪害纭
+    ("before_material", 85),        # 鏈€缁堥珮妯＄‘璁?]
 ```
 
-**接口设计**:
+**鎺ュ彛璁捐**:
 ```python
 class UIModelingFeedback:
     async def checkpoint(
@@ -116,70 +100,65 @@ class UIModelingFeedback:
         current_progress: float,
         preview_path: str
     ) -> UserFeedback:
-        """在特定 stage 暂停，等待用户确认"""
+        """鍦ㄧ壒瀹?stage 鏆傚仠锛岀瓑寰呯敤鎴风‘璁?""
         pass
 ```
 
-**验收标准**:
-- [ ] 4个关键反馈节点实现
-- [ ] 预览截图自动生成
-- [ ] 用户可选项：[继续, 调整, 重做, 停止]
-- [ ] 中断后可恢复机制
+**楠屾敹鏍囧噯**:
+- [ ] 4涓叧閿弽棣堣妭鐐瑰疄鐜?- [ ] 棰勮鎴浘鑷姩鐢熸垚
+- [ ] 鐢ㄦ埛鍙€夐」锛歔缁х画, 璋冩暣, 閲嶅仛, 鍋滄]
+- [ ] 涓柇鍚庡彲鎭㈠鏈哄埗
 
 ---
 
-### 实施 C: 集成图像分析能力 (P1 - 中优先级)
+### 瀹炴柦 C: 闆嗘垚鍥惧儚鍒嗘瀽鑳藉姏 (P1 - 涓紭鍏堢骇)
 
-**目标**: 支持用户上传参考图，LLM 分析后生成建模计划
+**鐩爣**: 鏀寔鐢ㄦ埛涓婁紶鍙傝€冨浘锛孡LM 鍒嗘瀽鍚庣敓鎴愬缓妯¤鍒?
+**棰勮宸ユ湡**: 3-5 灏忔椂
 
-**预计工期**: 3-5 小时
-
-**新增模块**:
-- `vbf/image_analyzer.py` - 图像分析器
-- `vbf/vlm_adapter.py` - VLM 接入层
-
-**VLM 选型** (可选):
+**鏂板妯″潡**:
+- `vbf/image_analyzer.py` - 鍥惧儚鍒嗘瀽鍣?- `vbf/vlm_adapter.py` - VLM 鎺ュ叆灞?
+**VLM 閫夊瀷** (鍙€?:
 - GPT-4V (OpenAI)
 - Claude 3 Vision (Anthropic)
 - Gemini Pro Vision (Google)
-- 本地模型 (LLaVA 等，需 GPU)
+- 鏈湴妯″瀷 (LLaVA 绛夛紝闇€ GPU)
 
-**功能实现**:
+**鍔熻兘瀹炵幇**:
 ```python
 class ReferenceImageAnalyzer:
     async def analyze(self, image_path: str) -> ImageAnalysisResult:
-        """分析参考图，返回建模指导"""
+        """鍒嗘瀽鍙傝€冨浘锛岃繑鍥炲缓妯℃寚瀵?""
         return {
-            "object_type": "硬表面/角色/有机",
-            "dominant_shapes": ["立方体", "圆柱", "圆环"],
+            "object_type": "纭〃闈?瑙掕壊/鏈夋満",
+            "dominant_shapes": ["绔嬫柟浣?, "鍦嗘煴", "鍦嗙幆"],
             "estimated_dimensions": {"height": 2.0, "width": 1.5, "depth": 1.0},
-            "key_features": ["尖锐边缘", "圆角过渡", "表面按钮"],
-            "style_hints": "写实/风格化/低多边形",
-            "complexity_level": "简单/中等/复杂"
+            "key_features": ["灏栭攼杈圭紭", "鍦嗚杩囨浮", "琛ㄩ潰鎸夐挳"],
+            "style_hints": "鍐欏疄/椋庢牸鍖?浣庡杈瑰舰",
+            "complexity_level": "绠€鍗?涓瓑/澶嶆潅"
         }
 ```
 
-**CLI 更新**:
+**CLI 鏇存柊**:
 ```bash
-# 新选项
+# 鏂伴€夐」
 vbf --prompt "create a retro radio" --reference-image "./radio_sketch.jpg"
 ```
 
-**验收标准**:
-- [ ] 支持常见图片格式 (PNG/JPG/WebP)
-- [ ] 图像分析结果用于生成第一阶段 plan
-- [ ] CLI 支持 --reference-image 参数
-- [ ] 文档更新
+**楠屾敹鏍囧噯**:
+- [ ] 鏀寔甯歌鍥剧墖鏍煎紡 (PNG/JPG/WebP)
+- [ ] 鍥惧儚鍒嗘瀽缁撴灉鐢ㄤ簬鐢熸垚绗竴闃舵 plan
+- [ ] CLI 鏀寔 --reference-image 鍙傛暟
+- [ ] 鏂囨。鏇存柊
 
 ---
 
-### 实施 D: 风格模板系统 (P2 - 低优先级)
+### 瀹炴柦 D: 椋庢牸妯℃澘绯荤粺 (P2 - 浣庝紭鍏堢骇)
 
-**目标**: 预置风格模板，快速切换建模风格
+**鐩爣**: 棰勭疆椋庢牸妯℃澘锛屽揩閫熷垏鎹㈠缓妯￠鏍?
+**棰勮宸ユ湡**: 3-4 灏忔椂
 
-**预计工期**: 3-4 小时
-
-**预置模板**:
+**棰勭疆妯℃澘**:
 ```python
 STYLE_TEMPLATES = {
     "hard_surface_realistic": {
@@ -203,51 +182,47 @@ STYLE_TEMPLATES = {
 }
 ```
 
-**验收标准**:
-- [ ] 3种以上风格模板
-- [ ] CLI 支持 --style 参数
-- [ ] 模板可扩展
-
+**楠屾敹鏍囧噯**:
+- [ ] 3绉嶄互涓婇鏍兼ā鏉?- [ ] CLI 鏀寔 --style 鍙傛暟
+- [ ] 妯℃澘鍙墿灞?
 ---
 
-## 实施优先级
-
+## 瀹炴柦浼樺厛绾?
 ```
-Phase 1 (必须): [实施 A] + [实施 B]
-  ├── 重构 stage 流程 (2-4h)
-  └── 增加反馈循环 (4-6h)
-  总工期: 6-10 小时
+Phase 1 (蹇呴』): [瀹炴柦 A] + [瀹炴柦 B]
+  鈹溾攢鈹€ 閲嶆瀯 stage 娴佺▼ (2-4h)
+  鈹斺攢鈹€ 澧炲姞鍙嶉寰幆 (4-6h)
+  鎬诲伐鏈? 6-10 灏忔椂
 
-Phase 2 (推荐): [实施 C]
-  └── 图像分析能力 (3-5h)
+Phase 2 (鎺ㄨ崘): [瀹炴柦 C]
+  鈹斺攢鈹€ 鍥惧儚鍒嗘瀽鑳藉姏 (3-5h)
   
-Phase 3 (可选): [实施 D]
-  └── 风格模板系统 (3-4h)
+Phase 3 (鍙€?: [瀹炴柦 D]
+  鈹斺攢鈹€ 椋庢牸妯℃澘绯荤粺 (3-4h)
 
-总工期: 12-19 小时
+鎬诲伐鏈? 12-19 灏忔椂
 ```
 
 ---
 
-## 风险与依赖
-
-| 风险 | 影响 | 缓解方案 |
+## 椋庨櫓涓庝緷璧?
+| 椋庨櫓 | 褰卞搷 | 缂撹В鏂规 |
 |------|------|---------|
-| VLM API 成本 | 实施 C | 提供本地模型选项，或使用 cost‑effective 的 VLM |
-| 用户反馈中断恢复 | 实施 B | 强化 TaskState 机制 |
-| 阶段增多导致 LLM 计划过长 | 实施 A | 优化 Prompt，或使用温和的提示 |
+| VLM API 鎴愭湰 | 瀹炴柦 C | 鎻愪緵鏈湴妯″瀷閫夐」锛屾垨浣跨敤 cost鈥慹ffective 鐨?VLM |
+| 鐢ㄦ埛鍙嶉涓柇鎭㈠ | 瀹炴柦 B | 寮哄寲 TaskState 鏈哄埗 |
+| 闃舵澧炲瀵艰嚧 LLM 璁″垝杩囬暱 | 瀹炴柦 A | 浼樺寲 Prompt锛屾垨浣跨敤娓╁拰鐨勬彁绀?|
 
 ---
 
-## 相关文件
+## 鐩稿叧鏂囦欢
 
-- `vbf/client.py` - run_task() 核心流程
-- `vbf/llm_integration.py` - LLM Prompt 构建
-- `vbf/task_state.py` - 状态保存/恢复
-- `vbf/progress.py` - 进度显示
-- `vbf/scene_state.py` - 场景捕获
+- `vbf/app/client.py` - run_task() 鏍稿績娴佺▼
+- `vbf/llm_integration.py` - LLM Prompt 鏋勫缓
+- `vbf/task_state.py` - 鐘舵€佷繚瀛?鎭㈠
+- `vbf/progress.py` - 杩涘害鏄剧ず
+- `vbf/scene_state.py` - 鍦烘櫙鎹曡幏
 
 ---
 
-**最后更新**: 2026-04-12
-**状态**: 待用户确认后开始实施
+**鏈€鍚庢洿鏂?*: 2026-04-12
+**鐘舵€?*: 寰呯敤鎴风‘璁ゅ悗寮€濮嬪疄鏂?

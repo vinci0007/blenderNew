@@ -2,13 +2,13 @@
 
 import sys
 import pytest
-from vbf.client import VBFClient
-from vbf.task_state import TaskState, TaskInterruptedError
-from vbf.scene_state import SceneState, FeedbackContext
-from vbf.llm_integration import (
+from vbf.app.client import VBFClient
+from vbf.core.task_state import TaskState, TaskInterruptedError
+from vbf.core.scene_state import SceneState, FeedbackContext
+from vbf.llm.integration import (
     is_llm_enabled, load_llm, generate_skill_plan, call_llm_json
 )
-from vbf.plan_normalization import normalize_plan
+from vbf.core.plan_normalization import normalize_plan
 
 
 class TestModuleImports:
@@ -16,24 +16,24 @@ class TestModuleImports:
 
     def test_client_import(self):
         """VBFClient should import without error."""
-        from vbf.client import VBFClient
+        from vbf.app.client import VBFClient
         assert VBFClient is not None
 
     def test_task_state_import(self):
         """TaskState and TaskInterruptedError should import."""
-        from vbf.task_state import TaskState, TaskInterruptedError
+        from vbf.core.task_state import TaskState, TaskInterruptedError
         assert TaskState is not None
         assert TaskInterruptedError is not None
 
     def test_scene_state_import(self):
         """SceneState and FeedbackContext should import."""
-        from vbf.scene_state import SceneState, FeedbackContext
+        from vbf.core.scene_state import SceneState, FeedbackContext
         assert SceneState is not None
         assert FeedbackContext is not None
 
     def test_llm_integration_import(self):
         """LLM integration functions should import."""
-        from vbf.llm_integration import (
+        from vbf.llm.integration import (
             generate_skill_plan, call_llm_json, is_llm_enabled
         )
         assert generate_skill_plan is not None
@@ -42,7 +42,7 @@ class TestModuleImports:
 
     def test_plan_normalization_import(self):
         """normalize_plan should import."""
-        from vbf.plan_normalization import normalize_plan
+        from vbf.core.plan_normalization import normalize_plan
         assert normalize_plan is not None
 
 
@@ -60,6 +60,7 @@ class TestVBFClient:
         client = VBFClient()
         # Path should contain 'task_state.json'
         assert 'task_state.json' in client._default_save_path
+        assert "cache" in client._default_save_path.replace("\\", "/")
 
 
 class TestTaskState:

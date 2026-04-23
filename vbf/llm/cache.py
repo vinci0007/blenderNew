@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import OrderedDict
+from ..config_runtime import load_project_paths
 
 
 @dataclass
@@ -80,12 +81,7 @@ class LLMCache:
 
         # Disk cache directory
         if disk_cache_dir is None:
-            try:
-                base_path = Path(__file__).parent
-            except NameError:
-                # __file__ not available (e.g., frozen/embedded), fallback to cwd
-                base_path = Path.cwd()
-            disk_cache_dir = base_path / "config" / "llm_cache"
+            disk_cache_dir = load_project_paths()["llm_cache_dir"]
         self._disk_dir = Path(disk_cache_dir)
         self._disk_dir.mkdir(parents=True, exist_ok=True)
 

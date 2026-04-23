@@ -3,7 +3,7 @@
 import pytest
 from hypothesis import given, strategies as st
 
-from vbf.plan_normalization import (
+from vbf.core.plan_normalization import (
     extract_skills_plan,
     normalize_step_field_names,
     apply_parameter_aliases,
@@ -53,6 +53,19 @@ class TestExtractSkillsPlan:
         wrapped = {"foo": {"bar": {"payload": {"steps": [{"step_id": "001", "skill": "x", "args": {}}]}}}}
         result = extract_skills_plan(wrapped)
         assert result["steps"][0]["step_id"] == "001"
+
+    def test_prefer_nonempty_nested_steps_over_empty_root_steps(self):
+        """Should prefer nested non-empty steps over top-level empty fallback."""
+        wrapped = {
+            "steps": [],
+            "result": {
+                "steps": [{"step_id": "001", "skill": "create_primitive", "args": {"type": "cube"}}]
+            },
+        }
+        result = extract_skills_plan(wrapped)
+        assert isinstance(result.get("steps"), list)
+        assert len(result["steps"]) == 1
+        assert result["steps"][0]["skill"] == "create_primitive"
 
     def test_do_not_treat_non_step_list_as_steps(self):
         """Should not mis-detect generic dict arrays as executable steps."""
@@ -115,6 +128,32 @@ class TestApplyParameterAliases:
         args = {"type": "cube", "primitive_type": "sphere"}
         apply_parameter_aliases("create_primitive", args)
         assert args == {"primitive_type": "sphere"}
+
+    def test_apply_modifier_alias_modifier_to_modifier_name(self):
+        """Should rename 'modifier' to 'modifier_name' for apply_modifier."""
+        args = {"object_name": "Cube", "modifier": "Bevel"}
+        apply_parameter_aliases("apply_modifier", args)
+        assert args == {"object_name": "Cube", "modifier_name": "Bevel"}
+
+    def test_create_primitive_alias_primitive_to_primitive_type(self):
+        """Should rename 'primitive' to 'primitive_type' for create_primitive."""
+        args = {"primitive": "cube", "location": [0, 0, 0]}
+        apply_parameter_aliases("create_primitive", args)
+        assert args == {"primitive_type": "cube", "location": [0, 0, 0]}
+
+    def test_boolean_tool_aliases_and_lowercase_operation(self):
+        """Should normalize boolean_tool arg names and operation case."""
+        args = {
+            "target_object": "Body",
+            "boolean_object": "Cutter",
+            "operation": "DIFFERENCE",
+        }
+        apply_parameter_aliases("boolean_tool", args)
+        assert args == {
+            "target_name": "Body",
+            "tool_name": "Cutter",
+            "operation": "difference",
+        }
 
 
 class TestEnsureOnSuccessStructure:

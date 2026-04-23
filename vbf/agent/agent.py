@@ -31,10 +31,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+from ..config_runtime import load_project_paths
 
 try:
-    from ..client import VBFClient
-    from ..task_state import TaskInterruptedError
+    from ..app.client import VBFClient
+    from ..core.task_state import TaskInterruptedError
 except ImportError:
     # Blender not available - agent can still manage sessions
     VBFClient = None
@@ -266,7 +267,7 @@ class VBFAgent:
                         "properties": {
                             "state_path": {
                                 "type": "string",
-                                "description": "Path to the task state JSON file (default: vbf/config/task_state.json)",
+                                "description": "Path to the task state JSON file (default: vbf/cache/task_state.json)",
                             },
                         },
                     },
@@ -436,9 +437,7 @@ class VBFAgent:
 
     async def tool_resume_task(self, state_path: Optional[str] = None) -> Dict[str, Any]:
         """Tool wrapper: vbf_resume_task."""
-        state_path = state_path or os.path.join(
-            os.path.dirname(__file__), "..", "config", "task_state.json"
-        )
+        state_path = state_path or load_project_paths()["task_state_file"]
         if not os.path.exists(state_path):
             return {"ok": False, "error": f"State file not found: {state_path}"}
 

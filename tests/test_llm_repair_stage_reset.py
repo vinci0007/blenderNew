@@ -1,12 +1,12 @@
 """
 Bug condition exploration tests for LLM repair stage reset.
 
-Task 1: Verify the bug exists — the current (unfixed) repair branch raises
+Task 1: Verify the bug exists 鈥?the current (unfixed) repair branch raises
 ValueError when replace_from_step_id points to an earlier step, and does not
 reset current_stage_rank, causing Stage order violation.
 
 These tests encode the EXPECTED (fixed) behavior.
-They MUST FAIL on unfixed code — failure confirms the bug exists.
+They MUST FAIL on unfixed code 鈥?failure confirms the bug exists.
 They will PASS after the fix is applied.
 
 Validates: Requirements 1.1, 1.2
@@ -15,7 +15,7 @@ Validates: Requirements 1.1, 1.2
 import pytest
 
 # ---------------------------------------------------------------------------
-# Stage order dict — mirrors the one in vbf/client.py run_task
+# Stage order dict 鈥?mirrors the one in vbf/app/client.py run_task
 # ---------------------------------------------------------------------------
 
 STAGE_ORDER = {
@@ -119,7 +119,7 @@ class TestEarlyReplaceJsonRpcBranch:
         UNFIXED behavior: raises ValueError("LLM repair replace_from_step_id mismatch").
         EXPECTED (fixed) behavior: no ValueError raised; steps truncated correctly.
 
-        This test FAILS on unfixed code — confirming the bug exists.
+        This test FAILS on unfixed code 鈥?confirming the bug exists.
         Counterexample: ValueError: LLM repair replace_from_step_id mismatch: got s0, expected s2
 
         Validates: Requirements 1.1
@@ -131,7 +131,7 @@ class TestEarlyReplaceJsonRpcBranch:
         ]
         i = 2
         step_id = "s2"
-        replace_from = "s0"  # earlier than i=2 → bug condition
+        replace_from = "s0"  # earlier than i=2 鈫?bug condition
         repair_steps = [
             {"step_id": "s0_repair", "stage": "discover", "skill": "create_primitive", "args": {}},
         ]
@@ -212,7 +212,7 @@ class TestStageRankNotResetCausesViolation:
         EXPECTED (fixed) behavior: current_stage_rank is reset to -1 (no
         completed steps before replace_idx=0), repair step passes.
 
-        This test FAILS on unfixed code — confirming the second bug.
+        This test FAILS on unfixed code 鈥?confirming the second bug.
         Counterexample: ValueError: Stage order violation at step_id=s0_repair: discover cannot go backwards.
 
         Validates: Requirements 1.2
@@ -226,7 +226,7 @@ class TestStageRankNotResetCausesViolation:
             {"step_id": "s0_repair", "stage": "discover", "skill": "create_primitive", "args": {}},
         ]
         step_results = {"s0": {"ok": True, "data": {}}, "s1": {"ok": True, "data": {}}}
-        current_stage_rank = 2  # boolean rank — set after s1 succeeded
+        current_stage_rank = 2  # boolean rank 鈥?set after s1 succeeded
 
         # Use the FIXED simulation: replace_from="s0" (replace_idx=0 < i=2)
         # Fixed behavior: i reset to 0, current_stage_rank reset to -1 (no completed
@@ -245,7 +245,7 @@ class TestStageRankNotResetCausesViolation:
         )
         assert new_i == 0, f"Expected i=0 (replace_idx), got {new_i}"
 
-        # Now simulate the stage check for the repair step — should NOT raise
+        # Now simulate the stage check for the repair step 鈥?should NOT raise
         repair_step = new_steps[new_i]
         try:
             _check_stage_order_violation(repair_step, STAGE_ORDER, new_rank)
@@ -266,17 +266,17 @@ class TestStageRankNotResetCausesViolation:
 
         Validates: Requirements 1.2
         """
-        current_stage_rank = 2  # boolean rank — NOT reset in unfixed code
+        current_stage_rank = 2  # boolean rank 鈥?NOT reset in unfixed code
 
         # In unfixed code: rank stays at 2
         # A repair step with stage "discover" (rank 0) would trigger violation
         repair_stage = "discover"
         repair_rank = STAGE_ORDER[repair_stage]
 
-        # Confirm the bug condition: repair rank < current rank → violation would occur
+        # Confirm the bug condition: repair rank < current rank 鈫?violation would occur
         assert repair_rank < current_stage_rank, (
             f"Bug condition confirmed: repair stage rank {repair_rank} < "
-            f"current_stage_rank {current_stage_rank} → "
+            f"current_stage_rank {current_stage_rank} 鈫?"
             f"Stage order violation would be triggered in unfixed code"
         )
 
@@ -303,7 +303,7 @@ class TestBothBranchesHaveBug:
         step_results = {"s0": {"ok": True, "data": {}}, "s1": {"ok": True, "data": {}}}
         repair_steps = [{"step_id": "s1r", "stage": "blockout", "skill": "create_primitive", "args": {}}]
 
-        # replace_from="s1" (replace_idx=1 < i=2) — bug condition
+        # replace_from="s1" (replace_idx=1 < i=2) 鈥?bug condition
         try:
             _simulate_repair_branch_fixed(
                 steps, i=2, step_id="s2", replace_from="s1",
@@ -334,7 +334,7 @@ class TestBothBranchesHaveBug:
         step_results = {"s0": {"ok": True, "data": {}}, "s1": {"ok": True, "data": {}}}
         repair_steps = [{"step_id": "s1r", "stage": "blockout", "skill": "create_primitive", "args": {}}]
 
-        # Same scenario — both branches have identical bug
+        # Same scenario 鈥?both branches have identical bug
         try:
             _simulate_repair_branch_fixed(
                 steps, i=2, step_id="s2", replace_from="s1",
@@ -351,7 +351,7 @@ class TestBothBranchesHaveBug:
 
 
 # ===========================================================================
-# Task 2: Preservation property tests (run on UNFIXED code — must PASS)
+# Task 2: Preservation property tests (run on UNFIXED code 鈥?must PASS)
 #
 # These tests capture existing correct behavior that must NOT be broken by
 # the fix. They verify:
@@ -414,7 +414,7 @@ class TestEqualReplaceCasePreservation:
 
     def test_equal_replace_unit_no_error(self):
         """
-        Unit test: replace_from == step_id → no ValueError, i unchanged,
+        Unit test: replace_from == step_id 鈫?no ValueError, i unchanged,
         current_stage_rank unchanged.
         """
         steps = [
@@ -428,7 +428,7 @@ class TestEqualReplaceCasePreservation:
         step_results = {"s0": {"ok": True}, "s1": {"ok": True}}
         i = 2
         step_id = "s2"
-        replace_from = "s2"  # equal case — NOT a bug condition
+        replace_from = "s2"  # equal case 鈥?NOT a bug condition
         current_stage_rank = 1  # blockout rank
 
         new_steps, new_i, new_rank = _simulate_repair_branch_unfixed(
@@ -444,7 +444,7 @@ class TestEqualReplaceCasePreservation:
 
     def test_equal_replace_unit_none_replace_from(self):
         """
-        Unit test: replace_from is None → treated as equal case, no error,
+        Unit test: replace_from is None 鈫?treated as equal case, no error,
         i and current_stage_rank unchanged.
         """
         steps = [
@@ -513,7 +513,7 @@ class TestEqualReplaceCasePreservation:
 
 
 # ---------------------------------------------------------------------------
-# Preservation Test 2: Normal execution (no repair) — monotonic stage rank
+# Preservation Test 2: Normal execution (no repair) 鈥?monotonic stage rank
 # Requirements 3.2, 3.3
 # ---------------------------------------------------------------------------
 
@@ -563,7 +563,7 @@ class TestNormalExecutionPreservation:
         """
         Unit test: a decreasing stage sequence raises ValueError (existing behavior preserved).
         """
-        sequence = ["boolean", "blockout"]  # blockout rank < boolean rank → violation
+        sequence = ["boolean", "blockout"]  # blockout rank < boolean rank 鈫?violation
         with pytest.raises(ValueError, match="Stage order violation"):
             _simulate_stage_monotonicity(sequence, STAGE_ORDER)
 
@@ -612,7 +612,7 @@ class TestInvalidStepIdPreservation:
 
     On unfixed code: the mismatch check fires first (if replace_from != step_id),
     raising "mismatch" error. After the fix, _find_replace_idx raises "not found".
-    Either way, an error is raised — this behavior is preserved.
+    Either way, an error is raised 鈥?this behavior is preserved.
 
     Validates: Requirements 3.4
     """
@@ -643,7 +643,7 @@ class TestInvalidStepIdPreservation:
         repair_steps = [
             {"step_id": "s_new", "stage": "discover", "skill": "create_primitive", "args": {}},
         ]
-        # replace_from is not in steps AND differs from step_id → unfixed raises mismatch
+        # replace_from is not in steps AND differs from step_id 鈫?unfixed raises mismatch
         with pytest.raises(ValueError):
             _simulate_repair_branch_unfixed(
                 steps, i=0, step_id="s0", replace_from="nonexistent_id",
@@ -675,6 +675,6 @@ class TestInvalidStepIdPreservation:
             {"step_id": sid, "stage": stages[idx % len(stages)], "skill": "create_primitive", "args": {}}
             for idx, sid in enumerate(step_ids)
         ]
-        # bad_id uses uppercase letters, step_ids use lowercase — guaranteed not found
+        # bad_id uses uppercase letters, step_ids use lowercase 鈥?guaranteed not found
         with pytest.raises(ValueError, match="not found"):
             _find_replace_idx(steps, bad_id)

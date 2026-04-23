@@ -1,7 +1,7 @@
 import pytest
 
-from vbf.feedback_control import ClosedLoopControl
-from vbf.jsonrpc_ws import JsonRpcError
+from vbf.feedback.control import ClosedLoopControl
+from vbf.transport.jsonrpc_ws import JsonRpcError
 
 
 class _FailingClient:

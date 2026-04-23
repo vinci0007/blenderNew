@@ -2,9 +2,11 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
+from ..config_runtime import get_default_config_path, load_full_config
 
 
 class LLMError(RuntimeError):
@@ -12,7 +14,7 @@ class LLMError(RuntimeError):
 
 
 def _extract_first_json_object(text: str) -> Dict[str, Any]:
-    """Best-effort JSON extraction — handles providers that wrap JSON in prose."""
+    """Best-effort JSON extraction 閳?handles providers that wrap JSON in prose."""
     if not text:
         raise LLMError("Empty LLM response")
     start = text.find("{")
@@ -26,7 +28,7 @@ def _extract_first_json_object(text: str) -> Dict[str, Any]:
 
 
 def _parse_bool_field(data: dict, key: str, default: bool) -> bool:
-    """从 dict 中解析 bool 字段，支持类型容错。"""
+    """Parse a boolean-like field from config data."""
     if key not in data:
         return default
     value = data[key]
@@ -35,10 +37,26 @@ def _parse_bool_field(data: dict, key: str, default: bool) -> bool:
     if isinstance(value, int):
         return bool(value)
     logging.warning(
-        "vbf llm_config: field '%s' has unexpected type %s (value=%r), using default %s",
+        "vbf config llm section: field '%s' has unexpected type %s (value=%r), using default %s",
         key, type(value).__name__, value, default,
     )
     return default
+
+
+def _extract_llm_payload(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept either full config schema or llm-only schema."""
+    llm_section = raw_data.get("llm")
+    if isinstance(llm_section, dict):
+        return llm_section
+    return raw_data
+
+
+def _assert_supported_config_name(config_path: str) -> None:
+    if Path(config_path).name.lower() == "llm_config.json":
+        raise LLMError(
+            "Legacy config filename 'llm_config.json' is no longer supported. "
+            "Use 'config.json' instead."
+        )
 
 
 @dataclass
@@ -58,9 +76,9 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
     """
     Load LLM config in priority order:
     1. Env vars: VBF_LLM_BASE_URL, VBF_LLM_API_KEY, VBF_LLM_MODEL
-    2. Config file: VBF_LLM_CONFIG_PATH or vbf/config/llm_config.json
+    2. Config file: VBF_CONFIG_PATH or vbf/config/config.json
     """
-    config_path = config_path or os.getenv("VBF_LLM_CONFIG_PATH")
+    config_path = config_path or os.getenv("VBF_CONFIG_PATH")
 
     base_url = os.getenv("VBF_LLM_BASE_URL")
     api_key = os.getenv("VBF_LLM_API_KEY")
@@ -79,19 +97,23 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
             auto_allow_low_level_gateway=os.getenv("VBF_AUTO_ALLOW_LOW_LEVEL_GATEWAY", "1") == "1",
         )
 
-    if not config_path:
-        default = os.path.join(os.path.dirname(__file__), "config", "llm_config.json")
-        if os.path.exists(default):
-            config_path = default
+    data: Dict[str, Any]
+    if config_path:
+        _assert_supported_config_name(config_path)
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
+                data = _extract_llm_payload(json.load(f))
+        except Exception as e:
+            raise LLMError(f"Failed to load config: {config_path}: {e}") from e
+    else:
+        try:
+            full = load_full_config(get_default_config_path())
+        except Exception as e:
+            raise LLMError(f"Failed to load config: {get_default_config_path()}: {e}") from e
+        data = full.get("llm", {})
 
-    if not config_path:
+    if not isinstance(data, dict) or not data:
         return None
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        raise LLMError(f"Failed to load LLM config: {config_path}: {e}") from e
 
     return OpenAICompatConfig(
         base_url=data["base_url"],

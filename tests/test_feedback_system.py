@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import copy
 
-from vbf.client import VBFClient
-from vbf.scene_state import SceneState
-from vbf.geometry_capture import (
+from vbf.app.client import VBFClient
+from vbf.core.scene_state import SceneState
+from vbf.feedback.geometry_capture import (
     CaptureLevel, ObjectGeometry, GeometryDelta,
     IncrementalSceneCapture, ValidationResult,
 )
-from vbf.feedback_rules import (
+from vbf.feedback.rules import (
     ValidationRuleRegistry, BuiltinValidationRules,
     register_custom_rule,
 )
@@ -460,8 +460,8 @@ class TestClosedLoopCheckpointRollback:
         rollback_mock = AsyncMock(return_value={"ok": True, "data": {"undone_steps": 2}})
         monkeypatch.setattr(client, "rollback_to_step", rollback_mock)
 
-        monkeypatch.setattr("vbf.feedback_control.ClosedLoopControl", _FakeClosedLoopControl)
-        monkeypatch.setattr("vbf.geometry_capture.IncrementalSceneCapture", _FakeCapture)
+        monkeypatch.setattr("vbf.feedback.control.ClosedLoopControl", _FakeClosedLoopControl)
+        monkeypatch.setattr("vbf.feedback.geometry_capture.IncrementalSceneCapture", _FakeCapture)
 
         result = await client.run_task_with_feedback(prompt="create a coherent product model")
 

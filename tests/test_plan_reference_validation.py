@@ -1,6 +1,6 @@
 import pytest
 
-from vbf.plan_normalization import normalize_plan
+from vbf.core.plan_normalization import normalize_plan
 
 
 def test_normalize_plan_accepts_backward_step_refs():

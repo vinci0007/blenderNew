@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, patch, AsyncMock
 import asyncio
 
-from vbf.llm_integration import (
+from vbf.llm.integration import (
     load_llm,
     load_llm_config,
     is_llm_enabled,
@@ -13,12 +13,12 @@ from vbf.llm_integration import (
     build_skill_repair_messages,
     generate_skill_plan,
 )
-from vbf.llm_cache import get_cache
+from vbf.llm.cache import get_cache
 
 
 @pytest.fixture(autouse=True)
 def clear_llm_cache():
-    """每个测试前清空 LLM 缓存。"""
+    """Clear LLM cache before each test."""
     cache = get_cache()
     cache.clear()
 
@@ -26,14 +26,14 @@ def clear_llm_cache():
 class TestLoadLLM:
     """Tests for load_llm function."""
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.load_openai_compat_config')
     def test_returns_none_when_not_configured(self, mock_load):
         """Should return None if LLM not configured."""
         mock_load.return_value = None
         result = load_llm()
         assert result is None
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.load_openai_compat_config')
     def test_returns_none_when_disabled(self, mock_load):
         """Should return None if use_llm is False."""
         mock_config = Mock()
@@ -43,8 +43,8 @@ class TestLoadLLM:
         result = load_llm()
         assert result is None
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
-    @patch('vbf.llm_integration.OpenAICompatLLM')
+    @patch('vbf.llm.integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.OpenAICompatLLM')
     def test_returns_llm_instance(self, mock_llm_class, mock_load):
         """Should return LLM instance when configured."""
         mock_config = Mock()
@@ -61,13 +61,13 @@ class TestLoadLLM:
 class TestIsLLMEnabled:
     """Tests for is_llm_enabled function."""
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.load_openai_compat_config')
     def test_false_when_not_configured(self, mock_load):
         """Should return False if not configured."""
         mock_load.return_value = None
         assert is_llm_enabled() is False
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.load_openai_compat_config')
     def test_false_when_disabled(self, mock_load):
         """Should return False if use_llm is False."""
         mock_config = Mock()
@@ -76,7 +76,7 @@ class TestIsLLMEnabled:
 
         assert is_llm_enabled() is False
 
-    @patch('vbf.llm_integration.load_openai_compat_config')
+    @patch('vbf.llm.integration.load_openai_compat_config')
     def test_true_when_enabled(self, mock_load):
         """Should return True if enabled."""
         mock_config = Mock()
@@ -199,7 +199,7 @@ class TestGenerateSkillPlan:
     """Tests for generate_skill_plan function."""
 
     @pytest.mark.asyncio
-    @patch('vbf.llm_integration.load_llm')
+    @patch('vbf.llm.integration.load_llm')
     async def test_raises_without_llm(self, mock_load_llm):
         """Should raise ValueError if LLM not available."""
         mock_load_llm.return_value = None

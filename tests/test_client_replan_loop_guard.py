@@ -2,9 +2,9 @@ import pytest
 from unittest.mock import AsyncMock
 import os
 
-from vbf.client import VBFClient
-from vbf.feedback_control import FeedbackDecision
-from vbf.task_state import TaskInterruptedError
+from vbf.app.client import VBFClient
+from vbf.feedback.control import FeedbackDecision
+from vbf.core.task_state import TaskInterruptedError
 
 
 class _DummyScene:
@@ -59,8 +59,8 @@ async def test_run_task_with_feedback_interrupts_on_repeated_replan_fingerprint(
     replan_mock = AsyncMock(return_value=({"execution": {"max_replans": 8}}, initial_steps))
     monkeypatch.setattr(client, "_replan_from_step", replan_mock)
 
-    monkeypatch.setattr("vbf.feedback_control.ClosedLoopControl", _FakeLoop)
-    monkeypatch.setattr("vbf.geometry_capture.IncrementalSceneCapture", _DummyCapture)
+    monkeypatch.setattr("vbf.feedback.control.ClosedLoopControl", _FakeLoop)
+    monkeypatch.setattr("vbf.feedback.geometry_capture.IncrementalSceneCapture", _DummyCapture)
 
     save_path = os.path.join("vbf", "config", "task_state_loop_guard_test.json")
     try:

@@ -1,5 +1,5 @@
 # VBF Skills Index
-## Version 2.1.0 - 363 Skills by Category
+## Version 2.2.0 - 357 Skills by Category
 
 **导航**: [主文档 SKILL.md](SKILL.md) | [按字母索引](#a-z-index) | [分类文档](categories/)
 

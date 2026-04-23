@@ -2,9 +2,10 @@
 
 import pytest
 import asyncio
+import json
 from unittest.mock import Mock, AsyncMock
 
-from vbf.llm_rate_limiter import (
+from vbf.llm.rate_limiter import (
     LLM_API_Throttle_Config,
     RateLimiter,
     LLMRateLimiter,
@@ -62,3 +63,31 @@ class TestRateLimiter:
         assert stats["throttled_calls"] == 0
 
 
+def test_load_throttle_config_from_nested_llm_section(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "project": {"paths": {}},
+                "llm": {
+                    "llm_api_throttling": {
+                        "max_concurrent_calls": 7,
+                        "max_calls_per_minute": 11,
+                        "call_timeout_seconds": 123,
+                        "retry_on_failure": {
+                            "max_attempts": 4,
+                            "delay_between_attempts_seconds": 1.5,
+                        },
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VBF_CONFIG_PATH", str(cfg))
+    config = load_throttle_config()
+    assert config is not None
+    assert config.max_concurrent_calls == 7
+    assert config.max_calls_per_minute == 11
+    assert config.call_timeout_seconds == 123

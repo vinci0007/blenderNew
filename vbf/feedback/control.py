@@ -19,9 +19,9 @@ from .geometry_capture import (
     ObjectGeometry,
     ValidationResult,
 )
-from .feedback_rules import ValidationRuleRegistry
-from .vibe_protocol import resolve_refs
-from .jsonrpc_ws import JsonRpcError
+from .rules import ValidationRuleRegistry
+from ..core.vibe_protocol import resolve_refs
+from ..transport.jsonrpc_ws import JsonRpcError
 
 
 @dataclass
@@ -355,7 +355,7 @@ class ClosedLoopControl:
     ) -> Optional[Any]:
         """Trigger LLM analysis at stage boundary."""
         try:
-            from .feedback_llm import GeometryFeedbackAnalyzer
+            from .llm import GeometryFeedbackAnalyzer
 
             analyzer = GeometryFeedbackAnalyzer(self.client)
             scene_state = await self.client.capture_scene_state()

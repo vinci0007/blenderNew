@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from pathlib import Path
 
-from vbf.llm_cache import (
+from vbf.llm.cache import (
     LLMCache,
     CacheEntry,
     get_cache,
@@ -236,3 +236,12 @@ class TestFuzzyMatching:
         result = cache.get(query_messages)
 
         assert result is None  # No exact match
+
+
+def test_default_disk_cache_dir_is_under_vbf_cache():
+    cache = LLMCache(memory_size=4)
+    try:
+        disk_dir = str(cache._disk_dir).replace("\\", "/")
+        assert disk_dir.endswith("/vbf/cache/llm_cache")
+    finally:
+        cache.clear()

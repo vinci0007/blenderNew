@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-from vbf.client import VBFClient
+from vbf.app.client import VBFClient
 from vbf.adapters import get_adapter
 
 class VBFAgent:

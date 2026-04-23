@@ -57,7 +57,7 @@ VBF enables natural-language driven 3D modeling in Blender through three core pr
 │   ├─ openai_compat_adapter.py  Unified OpenAI-compatible adapter
 │   └─ skill_registry.py  SkillRegistry singleton (global cache)
 ├─ client.py              VBFClient (4-layer control system)
-├─ config/llm_config.json LLM configuration
+├─ config/config.json LLM configuration
 ├─ llm_rate_limiter.py    Rate limiting with 429 exponential backoff
 └─ ...
 
@@ -96,7 +96,7 @@ uv run python -m vbf --prompt "create a retro radio"
 uv run python -m vbf --prompt "create a smartphone" --style hard_surface_realistic
 
 # Resume
-uv run python -m vbf --prompt "continue" --resume vbf/config/task_state.json
+uv run python -m vbf --prompt "continue" --resume vbf/cache/task_state.json
 ```
 
 ### Python API
@@ -114,7 +114,7 @@ async def main():
     # Resume from checkpoint
     result = await client.run_task(
         "create a detailed spaceship",
-        resume_state_path="vbf/config/task_state.json"
+        resume_state_path="vbf/cache/task_state.json"
     )
 
 asyncio.run(main())
@@ -137,20 +137,33 @@ asyncio.run(main())
 
 ## LLM Configuration
 
-Create `vbf/config/llm_config.json`:
+Create `vbf/config/config.json`:
 
 ```json
 {
-  "use_llm": true,
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "YOUR_KEY",
-  "model": "glm-4.7-flash",
-  "temperature": 0.2,
-  "llm_api_throttling": {
-    "max_concurrent_calls": 1,
-    "max_calls_per_minute": 20,
-    "call_timeout_seconds": 120,
-    "retry_on_failure": { "max_attempts": 3 }
+  "project": {
+    "paths": {
+      "cache_dir": "vbf/cache",
+      "logs_dir": "vbf/logs",
+      "task_state_file": "vbf/cache/task_state.json",
+      "last_gen_fail_file": "vbf/cache/last_gen_fail.txt",
+      "last_plan_fail_file": "vbf/cache/last_plan_fail.txt",
+      "last_plan_raw_file": "vbf/cache/last_plan_raw.txt",
+      "llm_cache_dir": "vbf/cache/llm_cache"
+    }
+  },
+  "llm": {
+    "use_llm": true,
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "YOUR_KEY",
+    "model": "glm-4.7-flash",
+    "temperature": 0.2,
+    "llm_api_throttling": {
+      "max_concurrent_calls": 1,
+      "max_calls_per_minute": 20,
+      "call_timeout_seconds": 120,
+      "retry_on_failure": { "max_attempts": 3 }
+    }
   }
 }
 ```
@@ -187,6 +200,12 @@ uv run pytest tests/
 uv run pytest tests/ -v
 ```
 
+### Test Layout Policy
+
+- `tests/` root keeps only stable tests for functionality/performance and PR regression coverage.
+- Temporary task-specific test scripts must be placed under `tests/task_tmp/`.
+- Default pytest discovery excludes `tests/task_tmp/`.
+
 ---
 
 ## Troubleshooting
@@ -194,9 +213,9 @@ uv run pytest tests/ -v
 | Issue | Solution |
 |-------|----------|
 | WS connection failed | Verify Blender addon running (N-panel → VBF → Status "Running") |
-| LLM not configured | Edit `vbf/config/llm_config.json` with API credentials |
+| LLM not configured | Edit `vbf/config/config.json` with API credentials |
 | 429 Rate limit | Auto-retries with exponential backoff |
-| Resume task | `vbf --prompt "..." --resume vbf/config/task_state.json` |
+| Resume task | `vbf --prompt "..." --resume vbf/cache/task_state.json` |
 
 ---
 

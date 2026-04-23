@@ -19,7 +19,7 @@ import asyncio
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..client import VBFClient
+    from ..app.client import VBFClient
 
 
 class SkillRegistry:

@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-vbf = "vbf.cli:main"
+vbf = "vbf.app.cli:main"
 
 [dependency-groups]
 dev = [
@@ -18,3 +18,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=0.26.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--ignore=tests/task_tmp"]

@@ -1,6 +1,6 @@
 import pytest
 
-from vbf.client import VBFClient
+from vbf.app.client import VBFClient
 
 
 @pytest.mark.asyncio
@@ -41,7 +41,7 @@ async def test_two_stage_planning_merges_and_reindexes_refs(monkeypatch):
             "set_render_resolution",
             "assign_material",
         ],
-        save_path="vbf/config/task_state.json",
+        save_path="vbf/cache/task_state.json",
     )
 
     assert plan["metadata"]["planning_mode"] == "two_stage"

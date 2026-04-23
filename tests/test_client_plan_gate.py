@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from vbf.client import VBFClient
+from vbf.app.client import VBFClient
 
 
 class _SchemaAdapter:
@@ -16,6 +16,12 @@ class _SchemaAdapter:
             return {
                 "primitive_type": {"required": True, "type": "str", "default": None},
                 "name": {"required": False, "type": "str", "default": None},
+            }
+        if skill_name == "mark_edge_crease":
+            return {
+                "object_name": {"required": True, "type": "str", "default": None},
+                "edges": {"required": True, "type": "list", "default": None},
+                "crease_value": {"required": False, "type": "float", "default": 1.0},
             }
         return {}
 
@@ -52,6 +58,57 @@ def test_plan_gate_rejects_missing_required():
         client._validate_plan_with_skill_schemas(plan, adapter, ["create_primitive"])
 
 
+def test_plan_gate_autofix_drops_mark_edge_crease_without_edges():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "001",
+                "skill": "create_primitive",
+                "args": {"primitive_type": "cube"},
+            },
+            {
+                "step_id": "002",
+                "skill": "mark_edge_crease",
+                "args": {"object_name": {"$ref": "step_001.data.object_name"}},
+            },
+        ]
+    }
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_primitive", "mark_edge_crease"],
+    )
+
+    assert len(steps) == 1
+    assert steps[0]["skill"] == "create_primitive"
+    assert len(plan["steps"]) == 1
+
+
+def test_plan_gate_autofix_fill_create_primitive_and_drop_unknown_args():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "001",
+                "skill": "create_primitive",
+                "args": {"bad_arg": 1},
+            }
+        ]
+    }
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_primitive"],
+    )
+
+    assert len(steps) == 1
+    assert steps[0]["args"]["primitive_type"] == "cube"
+    assert "bad_arg" not in steps[0]["args"]
+
+
 @pytest.mark.asyncio
 async def test_plan_skill_task_expands_subset_on_plan_gate_error(monkeypatch):
     client = VBFClient()
@@ -67,8 +124,8 @@ async def test_plan_skill_task_expands_subset_on_plan_gate_error(monkeypatch):
                 "steps": [
                     {
                         "step_id": "001",
-                        "skill": "create_primitive",
-                        "args": {"bad_arg": 1},
+                        "skill": "unknown_skill",
+                        "args": {},
                     }
                 ]
             }
@@ -88,7 +145,7 @@ async def test_plan_skill_task_expands_subset_on_plan_gate_error(monkeypatch):
     plan, steps = await client._plan_skill_task(
         prompt="create a precise phone with bevels",
         allowed_skills=allowed_skills,
-        save_path="vbf/config/task_state.json",
+        save_path="vbf/cache/task_state.json",
     )
 
     assert steps[0]["skill"] == "create_primitive"

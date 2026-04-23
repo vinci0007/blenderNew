@@ -19,7 +19,7 @@ import re
 from .base_adapter import VBFModelAdapter
 
 if TYPE_CHECKING:
-    from ..client import VBFClient
+    from ..app.client import VBFClient
 
 
 class OpenAICompatAdapter(VBFModelAdapter):

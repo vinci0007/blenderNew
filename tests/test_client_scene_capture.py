@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from vbf.client import VBFClient
+from vbf.app.client import VBFClient
 
 
 @pytest.mark.asyncio

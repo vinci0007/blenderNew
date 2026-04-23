@@ -156,8 +156,9 @@ class StyleTemplateManager:
 
     def _default_config_path(self) -> str:
         """Get default path for custom templates config."""
+        package_root = os.path.dirname(os.path.dirname(__file__))
         return os.path.join(
-            os.path.dirname(__file__), "config", "style_templates.json"
+            package_root, "config", "style_templates.json"
         )
 
     def _load_templates(self) -> None:

@@ -15,7 +15,15 @@ from typing import Any, Dict, Iterable, List, Set, Tuple
 PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
     "create_primitive": {
         "type": "primitive_type",  # LLM commonly uses 'type', actual is 'primitive_type'
+        "primitive": "primitive_type",  # Some models output 'primitive'
         "rotation": "rotation_euler",  # Blender primitive helper expects rotation_euler
+    },
+    "apply_modifier": {
+        "modifier": "modifier_name",  # LLM commonly uses 'modifier'
+    },
+    "boolean_tool": {
+        "target_object": "target_name",
+        "boolean_object": "tool_name",
     },
 }
 
@@ -132,40 +140,63 @@ def _looks_like_steps_list(value: Any) -> bool:
     )
 
 
+def _has_nonempty_steps(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    steps = value.get("steps")
+    return isinstance(steps, list) and len(steps) > 0
+
+
 def _find_plan_container(value: Any, depth: int = 0) -> Dict[str, Any] | None:
     """Find a dict containing `steps` from common or arbitrary wrapper layouts."""
     if depth > 8:
         return None
     if isinstance(value, dict):
+        fallback_empty: Dict[str, Any] | None = None
         steps = value.get("steps")
         if isinstance(steps, list):
-            # Accept empty list (later normalized as no executable steps) or
-            # list with step-like structures.
-            if not steps or _looks_like_steps_list(steps):
+            # Prefer non-empty executable steps immediately.
+            if steps and _looks_like_steps_list(steps):
                 return value
+            # Keep empty list as fallback only; continue searching for nested
+            # non-empty containers first.
+            if not steps:
+                fallback_empty = value
 
         # Common provider/model wrappers first.
         for key in ("skills_plan", "plan", "output", "result", "data", "response"):
             nested = value.get(key)
             found = _find_plan_container(nested, depth + 1)
             if found is not None:
-                return found
+                if _has_nonempty_steps(found):
+                    return found
+                if fallback_empty is None:
+                    fallback_empty = found
 
         # Generic recursive scan over all nested values as a fallback.
         for nested in value.values():
             found = _find_plan_container(nested, depth + 1)
             if found is not None:
-                return found
+                if _has_nonempty_steps(found):
+                    return found
+                if fallback_empty is None:
+                    fallback_empty = found
+        return fallback_empty
     elif isinstance(value, list):
         # Some models may directly return step list.
         if _looks_like_steps_list(value):
             return {"steps": value}
 
         # Some models may wrap the plan object in arrays.
+        fallback_empty = None
         for nested in value:
             found = _find_plan_container(nested, depth + 1)
             if found is not None:
-                return found
+                if _has_nonempty_steps(found):
+                    return found
+                if fallback_empty is None:
+                    fallback_empty = found
+        return fallback_empty
     return None
 
 
@@ -207,6 +238,12 @@ def apply_parameter_aliases(skill_name: str, args: Dict[str, Any]) -> None:
                 # avoid passing unsupported kwargs to Blender skill functions.
                 if canonical not in args:
                     args[canonical] = alias_value
+
+    # Normalize enum-like values for known skills.
+    if skill_name == "boolean_tool":
+        operation = args.get("operation")
+        if isinstance(operation, str):
+            args["operation"] = operation.lower()
 
 
 def ensure_on_success_structure(on_success: Dict[str, Any]) -> None:

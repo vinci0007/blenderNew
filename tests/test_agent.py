@@ -143,7 +143,7 @@ class TestNoRegression:
 
     def test_vbf_client_still_importable(self):
         """VBFClient can still be imported."""
-        from vbf.client import VBFClient
+        from vbf.app.client import VBFClient
         assert VBFClient is not None
 
     def test_vbf_adapters_still_importable(self):
