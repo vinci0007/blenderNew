@@ -89,9 +89,11 @@ class ClosedLoopControl:
 
         self._validator = ValidationRuleRegistry()
         self._current_stage: Optional[str] = None
+        self._current_analysis_stage: Optional[str] = None
         self._stage_entry_index: int = 0
         self._step_index: int = 0
         self._stage_histories: Dict[str, List[str]] = {}  # stage -> [step_ids]
+        self._analysis_stage_histories: Dict[str, List[str]] = {}
 
         # Track failed steps for analysis
         self._failed_steps: List[Tuple[str, ValidationResult]] = []
@@ -122,6 +124,39 @@ class ClosedLoopControl:
             if isinstance(value, str) and value:
                 return value
         return None
+
+    @staticmethod
+    def _analysis_stage_for_step(step: Dict[str, Any]) -> str:
+        adaptive_stage = step.get("adaptive_stage")
+        if isinstance(adaptive_stage, str) and adaptive_stage:
+            return adaptive_stage
+        stage = str(step.get("stage", "detail") or "detail")
+        stage_groups = {
+            "primitive_blocking": "geometry_modeling",
+            "transform_alignment": "geometry_modeling",
+            "bevel_chamfer_support": "geometry_modeling",
+            "bevel_chamfer": "geometry_modeling",
+            "mesh_cleanup": "geometry_modeling",
+            "hierarchy_origin_cleanup": "geometry_modeling",
+            "assembly_parenting": "geometry_modeling",
+            "blockout": "geometry_modeling",
+            "boolean": "geometry_modeling",
+            "detail": "geometry_modeling",
+            "normal_fix": "geometry_modeling",
+            "accessories": "geometry_modeling",
+            "material_setup": "uv_texture_material",
+            "material": "uv_texture_material",
+            "uv_setup": "uv_texture_material",
+            "uv_prep": "uv_texture_material",
+            "material_prep": "uv_texture_material",
+            "material_assignment": "uv_texture_material",
+            "lighting_check": "environment_lighting",
+            "lighting_setup": "environment_lighting",
+            "camera_setup": "camera_render",
+            "render_setup": "camera_render",
+            "finalize": "camera_render",
+        }
+        return stage_groups.get(stage, stage)
 
     async def execute_with_feedback(
         self,
@@ -159,23 +194,26 @@ class ClosedLoopControl:
                 validation=validation,
             ), None
         stage = step.get("stage", "detail")
+        analysis_stage = self._analysis_stage_for_step(step)
         self._step_index += 1
 
-        # Stage boundary check (L3 - on stage exit)
+        # Analysis boundary check (L3 - on major/adaptive stage exit)
         previous_stage = self._current_stage
+        previous_analysis_stage = self._current_analysis_stage
         stage_changed = stage != previous_stage
-        if stage_changed and previous_stage and self.enable_llm_feedback:
-            analysis = await self._analyze_stage_boundary(previous_stage, step_results)
+        analysis_stage_changed = analysis_stage != previous_analysis_stage
+        if analysis_stage_changed and previous_analysis_stage and self.enable_llm_feedback:
+            analysis = await self._analyze_stage_boundary(previous_analysis_stage, step_results)
             if analysis and (
                 analysis.quality == "bad"
                 or float(getattr(analysis, "score", 1.0)) < self._stage_quality_threshold
             ):
-                previous_stage_steps = self._stage_histories.get(previous_stage, [])
+                previous_stage_steps = self._analysis_stage_histories.get(previous_analysis_stage, [])
                 rollback_step_id = previous_stage_steps[0] if previous_stage_steps else None
                 return FeedbackDecision(
                     action="checkpoint",
                     detail={
-                        "stage": previous_stage,
+                        "stage": previous_analysis_stage,
                         "analysis": analysis.to_dict() if hasattr(analysis, "to_dict") else analysis,
                         "reason": "quality_poor",
                         "step_id": step_id,
@@ -193,8 +231,12 @@ class ClosedLoopControl:
             self._stage_entry_index = self._step_index - 1
             self._stage_histories[stage] = []
             print(f"[Feedback] Entering stage: {stage}")
+        if analysis_stage_changed:
+            self._current_analysis_stage = analysis_stage
+            self._analysis_stage_histories.setdefault(analysis_stage, [])
 
         self._stage_histories.setdefault(stage, []).append(step_id)
+        self._analysis_stage_histories.setdefault(analysis_stage, []).append(step_id)
 
         # Determine target objects for this step
         target_objects = self._extract_target_objects(skill, resolved_args, step_results)

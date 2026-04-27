@@ -31,7 +31,24 @@ from .adapters import (
 )
 from .app.client import VBFClient
 
-__version__ = "2.2.0"
+def _read_version() -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("vibe-blender-flow")
+    except Exception:
+        try:
+            import tomllib
+            from pathlib import Path
+
+            pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            return str(data.get("project", {}).get("version", "0+unknown"))
+        except Exception:
+            return "0+unknown"
+
+
+__version__ = _read_version()
 
 __all__ = [
     "VBFModelAdapter",

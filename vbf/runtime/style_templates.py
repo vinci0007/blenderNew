@@ -268,9 +268,9 @@ def get_style_manager() -> StyleTemplateManager:
     return _style_manager
 
 
-def get_default_style() -> str:
-    """Get the default style name."""
-    return "hard_surface_realistic"
+def get_default_style() -> Optional[str]:
+    """Get the default style name, if one is enforced globally."""
+    return None
 
 
 def validate_style(style_name: str) -> bool:

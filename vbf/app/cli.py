@@ -65,14 +65,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--style",
         type=str,
-        default="hard_surface_realistic",
+        default=None,
         choices=[
             "hard_surface_realistic",
             "stylized_low_poly",
             "organic_character",
             "prop_industrial",
         ],
-        help="Modeling style template (default: hard_surface_realistic)",
+        help="Optional modeling style template",
     )
     p.add_argument("--list-styles", action="store_true", help="List available style templates")
 

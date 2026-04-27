@@ -617,17 +617,19 @@ async def test_requirement_assessment_low_confidence_preserves_downstream_stages
 
 
 @pytest.mark.asyncio
-async def test_requirement_assessment_simple_model_request_prefers_geometry(monkeypatch):
+async def test_requirement_assessment_simple_model_request_keeps_llm_material_stage(monkeypatch):
     client = VBFClient()
+    calls = []
 
     async def _fake_call(messages):
+        calls.append(messages)
         return {
-            "requested_stages": ["geometry_modeling", "uv_texture_material", "environment_lighting"],
+            "requested_stages": ["geometry_modeling", "uv_texture_material"],
             "excluded_stages": [],
-            "deliverable_level": "ambiguous",
+            "deliverable_level": "textured_asset",
             "explicit_scope": False,
             "confidence": 0.82,
-            "reason": "Over-preserved downstream stages.",
+            "reason": "The simple model includes material/color assignment.",
             "risks": [],
         }
 
@@ -645,5 +647,170 @@ async def test_requirement_assessment_simple_model_request_prefers_geometry(monk
 
     intent = await client._assess_adaptive_stage_intent("制作一个沙发3D模型")
 
+    assert intent.stages == ["geometry_modeling", "uv_texture_material"]
+    assert intent.explicit_scope == "llm_inferred"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_requirement_assessment_simple_model_request_keeps_llm_render_stages(monkeypatch):
+    client = VBFClient()
+    calls = []
+
+    async def _fake_call(messages):
+        calls.append(messages)
+        return {
+            "requested_stages": ["geometry_modeling", "environment_lighting", "camera_render"],
+            "excluded_stages": [],
+            "deliverable_level": "render_output",
+            "explicit_scope": False,
+            "confidence": 0.84,
+            "reason": "The first assessment preserves downstream scene output stages.",
+            "risks": [],
+        }
+
+    monkeypatch.setattr(client, "_adapter_call", _fake_call)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {
+            "requirement_assessment": {
+                "mode": "always",
+                "timeout_seconds": 5,
+                "prefer_geometry_for_simple_model_requests": True,
+            }
+        },
+    )
+
+    intent = await client._assess_adaptive_stage_intent("Create a sofa 3D model")
+
+    assert intent.stages == ["geometry_modeling", "environment_lighting", "camera_render"]
+    assert intent.explicit_scope == "llm_inferred"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_requirement_assessment_severe_conflict_resolves_geometry_only_with_second_llm(monkeypatch):
+    client = VBFClient()
+    calls = []
+
+    async def _fake_call(messages):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {
+                "requested_stages": ["geometry_modeling", "uv_texture_material", "environment_lighting"],
+                "excluded_stages": [],
+                "deliverable_level": "lit_scene",
+                "explicit_scope": False,
+                "confidence": 0.86,
+                "reason": "First pass over-expanded the request.",
+                "risks": [],
+            }
+        assert "Resolve a severe Blender requirement-assessment conflict" in messages[1]["content"]
+        return {
+            "requested_stages": ["geometry_modeling"],
+            "excluded_stages": ["uv_texture_material", "environment_lighting", "camera_render"],
+            "deliverable_level": "model_asset",
+            "explicit_scope": True,
+            "confidence": 0.94,
+            "reason": "The user explicitly limited the task to model creation.",
+            "risks": [],
+        }
+
+    monkeypatch.setattr(client, "_adapter_call", _fake_call)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {
+            "requirement_assessment": {
+                "mode": "always",
+                "timeout_seconds": 5,
+                "prefer_geometry_for_simple_model_requests": True,
+            }
+        },
+    )
+
+    intent = await client._assess_adaptive_stage_intent("Only create the model")
+
     assert intent.stages == ["geometry_modeling"]
-    assert intent.explicit_scope == "local_simple_model_guard"
+    assert intent.explicit_scope == "llm_explicit"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_requirement_assessment_second_llm_restores_locally_detected_explicit_stage(monkeypatch):
+    client = VBFClient()
+    calls = []
+
+    async def _fake_call(messages):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {
+                "requested_stages": ["geometry_modeling"],
+                "excluded_stages": [],
+                "deliverable_level": "model_asset",
+                "explicit_scope": True,
+                "confidence": 0.91,
+                "reason": "First pass missed the material request.",
+                "risks": [],
+            }
+        assert "llm_omitted_locally_detected_explicit_stage" in messages[1]["content"]
+        return {
+            "requested_stages": ["geometry_modeling", "uv_texture_material"],
+            "excluded_stages": ["animation", "camera_render"],
+            "deliverable_level": "textured_asset",
+            "explicit_scope": True,
+            "confidence": 0.95,
+            "reason": "The user explicitly asked for model creation plus PBR materials.",
+            "risks": [],
+        }
+
+    monkeypatch.setattr(client, "_adapter_call", _fake_call)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {"requirement_assessment": {"mode": "always", "timeout_seconds": 5}},
+    )
+
+    intent = await client._assess_adaptive_stage_intent(
+        "Only create the model and add clean PBR materials; no animation or final render"
+    )
+
+    assert intent.stages == ["geometry_modeling", "uv_texture_material"]
+    assert intent.explicit_scope == "llm_explicit"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_requirement_assessment_second_llm_failure_keeps_first_llm(monkeypatch):
+    client = VBFClient()
+    calls = []
+
+    async def _fake_call(messages):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {
+                "requested_stages": ["geometry_modeling", "uv_texture_material"],
+                "excluded_stages": [],
+                "deliverable_level": "textured_asset",
+                "explicit_scope": False,
+                "confidence": 0.86,
+                "reason": "First pass added a downstream stage.",
+                "risks": [],
+            }
+        raise TimeoutError("resolution timeout")
+
+    monkeypatch.setattr(client, "_adapter_call", _fake_call)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {
+            "requirement_assessment": {
+                "mode": "always",
+                "timeout_seconds": 5,
+                "prefer_geometry_for_simple_model_requests": True,
+            }
+        },
+    )
+
+    intent = await client._assess_adaptive_stage_intent("Only create the model")
+
+    assert intent.stages == ["geometry_modeling", "uv_texture_material"]
+    assert intent.explicit_scope == "llm_inferred"
+    assert len(calls) == 2

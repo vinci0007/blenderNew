@@ -81,6 +81,13 @@ def test_list_styles_does_not_require_prompt_inputs():
     assert args.prompt_file is None
 
 
+def test_parser_defaults_style_to_none():
+    parser = _build_parser()
+    args = parser.parse_args(["--prompt", "create", "a", "chair"])
+
+    assert args.style is None
+
+
 @pytest.mark.asyncio
 async def test_cli_run_saves_full_result_without_printing_payload(monkeypatch, tmp_path, capsys):
     result = {

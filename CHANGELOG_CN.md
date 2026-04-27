@@ -6,6 +6,25 @@
 
 **中文** | **[English](CHANGELOG.md)**
 
+## [2.3.2] - 2026-04-28
+
+### 变更
+
+- 调整默认 Prompt 风格行为，CLI/运行时默认不再自动追加 style 模板，只有用户显式传入 `--style` 时才应用风格。
+- 调整 `auto` 模式下的需求评估，保持 LLM 判断优先；本地简单模型规则只作为辅助证据，不再直接覆盖 LLM 阶段结果。
+- 明确 `uv_texture_material` 阶段契约，包含 UV、贴图、简单颜色分配、材质分配和 PBR/material preset。
+- 调整反馈 Analyzer 触发频率，从每个计划小阶段切换改为按主要/adaptive 分析阶段触发。
+
+### 修复
+
+- 修复带有明确颜色/材质要求的简单资产请求被本地 simple-model guard 压成纯几何阶段的问题。
+- 修复 Analyzer 遇到近似合法 JSON 时频繁进入解析兜底的问题，现在会先保守修复简单缺失闭合符，再回退到失败内容恢复。
+
+### 文档
+
+- 更新 README 和 README_CN，说明 LLM 优先需求评估、本地辅助证据、Analyzer 降频，以及扩展后的 `uv_texture_material` 阶段含义。
+- 新增 Release Notes 和 GitHub Release 自动化，发布版本统一读取 `pyproject.toml`；版本号使用数字三段式 `x.x.x` 并支持每段多位数字，自动触发的 GitHub Release 仅限大版本/阶段版本 `x.y.0`，手动触发可发布任意项目 `x.x.x` 版本。
+
 ## [2.3.1] - 2026-04-27
 
 ### 新增

@@ -844,6 +844,55 @@ class OpenAICompatAdapter(VBFModelAdapter):
                     return content[start : idx + 1]
         return None
 
+    @staticmethod
+    def _repair_json_closers(content: str) -> Optional[str]:
+        """Repair simple missing list/object closers in otherwise valid JSON text."""
+        in_string = False
+        escaped = False
+        stack: List[str] = []
+        repaired: List[str] = []
+
+        for ch in content:
+            if escaped:
+                repaired.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                repaired.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                repaired.append(ch)
+                in_string = not in_string
+                continue
+            if in_string:
+                repaired.append(ch)
+                continue
+            if ch in "{[":
+                stack.append(ch)
+                repaired.append(ch)
+                continue
+            if ch in "}]":
+                opener = "{" if ch == "}" else "["
+                closer_for_top = {"{": "}", "[": "]"}
+                while stack and stack[-1] != opener:
+                    previous = next((c for c in reversed(repaired) if not c.isspace()), "")
+                    if stack[-1] == "[" and previous in {"[", ",", ":"}:
+                        return None
+                    repaired.append(closer_for_top[stack.pop()])
+                if not stack:
+                    return None
+                stack.pop()
+                repaired.append(ch)
+                continue
+            repaired.append(ch)
+
+        closer_for_top = {"{": "}", "[": "]"}
+        while stack:
+            repaired.append(closer_for_top[stack.pop()])
+        repaired_text = "".join(repaired)
+        return repaired_text if repaired_text != content else None
+
     def parse_response(self, response: Any) -> Dict[str, Any]:
         """Parse OpenAI-compatible API response to VBF plan.
 
@@ -884,6 +933,12 @@ class OpenAICompatAdapter(VBFModelAdapter):
         try:
             return json.loads(json_text)
         except json.JSONDecodeError as e:
+            repaired_json = self._repair_json_closers(json_text)
+            if repaired_json is not None:
+                try:
+                    return json.loads(repaired_json)
+                except json.JSONDecodeError:
+                    pass
             return {
                 "error": "Failed to parse JSON from response",
                 "parse_stage": parse_stage,

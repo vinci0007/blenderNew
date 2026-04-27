@@ -172,8 +172,8 @@ class TestGlobalFunctions:
     """Tests for global module functions."""
 
     def test_get_default_style(self):
-        """Default style is hard_surface_realistic."""
-        assert get_default_style() == "hard_surface_realistic"
+        """Default style is disabled unless explicitly selected."""
+        assert get_default_style() is None
 
     def test_validate_style_valid(self):
         """Valid style returns True."""

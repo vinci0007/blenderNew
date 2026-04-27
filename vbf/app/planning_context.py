@@ -582,7 +582,8 @@ def build_adaptive_stage_prompt(
         ),
         "uv_texture_material": (
             "PLANNING MODE: ADAPTIVE STAGE / UV TEXTURE MATERIAL.\n"
-            "- Work from existing geometry; create UVs, seams, texture slots, and material assignments.\n"
+            "- Work from existing geometry; create UVs, seams, texture slots, simple color assignments, "
+            "material assignments, and PBR/material presets.\n"
             "- Do not rebuild primary geometry unless the stage cannot succeed without a small local helper."
         ),
         "environment_lighting": (

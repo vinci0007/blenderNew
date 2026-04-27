@@ -58,6 +58,39 @@ def test_build_api_request_with_mode_disables_tools_and_json_object():
     assert "response_format" not in request
 
 
+def test_parse_response_repairs_missing_array_closer():
+    adapter = OpenAICompatAdapter(
+        model_name="default",
+        model_config={
+            "base_url": "http://127.0.0.1:12347/v1",
+            "default_model": "dummy-model",
+        },
+        client=None,
+    )
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '{\n'
+                        '  "quality": "good",\n'
+                        '  "suggestions": ["check materials"],\n'
+                        '  "recommendations": {\n'
+                        '    "overall": ["keep names clear"\n'
+                        "  }\n"
+                        "}"
+                    )
+                }
+            }
+        ]
+    }
+
+    parsed = adapter.parse_response(response)
+
+    assert parsed["quality"] == "good"
+    assert parsed["recommendations"]["overall"] == ["keep names clear"]
+
+
 def test_auto_probe_downgrades_tools_when_gateway_rejects_tool_payload():
     calls = []
 

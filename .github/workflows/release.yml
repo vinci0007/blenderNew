@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - pyproject.toml
+      - RELEASE_NOTES.md
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional x.y.z release version; defaults to pyproject.toml [project].version"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          marker="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+            if [[ -z "${version}" ]]; then
+              version="${marker}"
+            fi
+            tag="v${version}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+          else
+            version="${marker}"
+            tag="v${version}"
+          fi
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Only numeric x.y.z versions can be released; '${version}' is not a release version." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" && ! "${version}" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Automatic releases only publish major/minor x.y.0 versions; '${version}' is changelog-only unless released manually." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${version}" != "${marker}" ]]; then
+            echo "pyproject.toml project.version is '${marker}', but requested release is '${version}'." >&2
+            exit 1
+          fi
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip non-release version
+        if: steps.version.outputs.release != 'true'
+        run: echo "${{ steps.version.outputs.reason }}"
+
+      - name: Extract release notes
+        if: steps.version.outputs.release == 'true'
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          awk -v version="${version}" '
+            $0 == "## " version { capture=1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' RELEASE_NOTES.md > release_body.md
+
+          if [[ ! -s release_body.md ]]; then
+            echo "No release notes found for ${version} in RELEASE_NOTES.md" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; skipping."
+            exit 0
+          fi
+
+          gh release create "${tag}" \
+            --title "VBF ${version}" \
+            --notes-file release_body.md \
+            --target "${GITHUB_SHA}" \
+            --latest

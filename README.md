@@ -4,7 +4,7 @@ Natural-language driven Blender modeling with staged planning, schema-aware skil
 
 **[中文](README_CN.md)** | **English**
 
-**[Changelog](CHANGELOG.md)** | **[更新日志](CHANGELOG_CN.md)**
+**[Changelog](CHANGELOG.md)** | **[更新日志](CHANGELOG_CN.md)** | **[Release Notes](RELEASE_NOTES.md)**
 
 [![License](https://img.shields.io/badge/License-TBD-lightgray.svg)](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
@@ -32,8 +32,10 @@ This keeps the workflow inspectable, resumable, and much easier to debug than di
 - Added per-task transcript logs that mirror all console stdout/stderr without truncating terminal output.
 - Added a daily plain-text run event log plus a separate per-task result JSON snapshot.
 - Added scene isolation controls so old objects do not leak into planning, feedback, and replan context by default.
-- Added analyzer parse fallback so non-strict LLM JSON no longer silently becomes a false `"good"` result.
-- Added a geometry-first guard for simple prompts like "make a sofa 3D model" unless later stages are explicitly requested.
+- Changed requirement assessment to stay LLM-first in `auto` mode; local simple-model checks now act as advisory evidence instead of overriding explicit downstream requirements.
+- Clarified that the `uv_texture_material` stage includes UVs, texture setup, simple color assignment, material assignment, and PBR/material presets.
+- Added conservative analyzer JSON repair for near-valid LLM responses with missing closing brackets.
+- Reduced feedback Analyzer calls by grouping sub-stage transitions into major/adaptive analysis stages.
 - Added local autofix for `create_material_simple` plans missing `base_color`.
 - Improved Blender diagnostics around modifier application order and `remove_doubles` vertex merge reporting.
 
@@ -141,16 +143,18 @@ uv run python -m vbf --prompt "continue" --resume vbf/cache/task_state.json
 
 The current default planning flow is:
 
-1. Assess the user's real deliverable scope.
+1. Assess the user's real deliverable scope, with LLM results preferred when the LLM is available.
 2. Select stages such as geometry, UV/material, lighting, animation, or render.
-3. Compress the skill set per stage using required capabilities rather than a naive top-k list.
-4. Ask the LLM for a structured plan.
-5. Normalize and validate arguments against skill schemas.
-6. Execute with feedback capture, local replan, resumable task state, and task-scoped logging.
+3. Use local evidence as an advisory conflict check; severe requirement conflicts are resolved by a second LLM pass.
+4. Compress the skill set per stage using required capabilities rather than a naive top-k list.
+5. Ask the LLM for a structured plan.
+6. Normalize and validate arguments against skill schemas.
+7. Execute with feedback capture, local replan, resumable task state, and task-scoped logging.
 
 This helps avoid common failure modes such as:
 
 - asking for render skills during a geometry-only task
+- dropping explicit material/color, lighting, animation, or render requirements from simple asset prompts
 - dropping required modeling capabilities during context compression
 - using unsupported tool/JSON modes on proxy gateways
 - emitting malformed or underspecified skill arguments
@@ -210,6 +214,16 @@ uv run pytest tests/test_config_runtime.py tests/test_client_two_stage_planning.
 python -m pytest tests/task_tmp/test_example.py -q
 ```
 
+## Release Notes And Version Source
+
+- User-facing release highlights live in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+- `pyproject.toml` `[project].version` is the single version source and uses numeric `x.x.x` format.
+- Each numeric segment may contain multiple digits, such as `2.13.105`.
+- Automatic GitHub Releases are created only for major/minor release versions where the first or second segment increases and the third segment is `0`, such as `v1.0.0` or `v1.1.0`.
+- Manual GitHub Release workflow runs may publish any numeric `x.x.x` project version, including patch versions such as `v1.1.1`.
+- Patch versions where the third segment is greater than `0`, such as `v1.1.1`, are changelog-only unless released manually.
+- When preparing a new `x.y.0` release, update `pyproject.toml` and the matching `RELEASE_NOTES.md` section together.
+
 ## Troubleshooting
 
 | Issue | What to check |
@@ -218,8 +232,8 @@ python -m pytest tests/task_tmp/test_example.py -q
 | Health check says running but tasks still hang | Restart the addon and verify the WebSocket + JSON-RPC probe succeeds |
 | LLM config not loading | Use `vbf/config/config.toml`, not legacy JSON config files |
 | A new task keeps mentioning old unrelated objects | Keep `[project.scene].task_scene_policy = "isolate"` so only task-relevant objects are sent into planning/feedback context |
-| Simple prompts jump into materials/render too early | Leave `llm.requirement_assessment.prefer_geometry_for_simple_model_requests = true` |
-| Analyzer reports `LLM parse error` | Check `vbf/cache/last_gen_fail.txt`; recent versions try to recover partial quality fields before falling back to manual inspection |
+| Simple prompts lose explicit colors/materials/render intent | Requirement assessment is LLM-first; keep `llm.requirement_assessment.prefer_geometry_for_simple_model_requests = true` as advisory evidence, not as a hard local override |
+| Analyzer reports `LLM parse error` | Check `vbf/cache/last_gen_fail.txt`; recent versions repair simple missing JSON closers and recover partial quality fields before falling back to manual inspection |
 | `plan_gate_missing_required ... create_material_simple missing arg=base_color` appears during replan | Recent versions auto-fill a neutral default `base_color`; upgrade if you still see hard failures |
 | Blender prints "applied modifier is not first" warnings | VBF now moves the target modifier to the top before applying and logs the reorder for traceability |
 | `remove_doubles` deletes an unexpectedly large number of vertices | Inspect the task log for before/after vertex counts and large-merge warnings before continuing |

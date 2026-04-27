@@ -52,6 +52,96 @@ def _is_simple_model_asset_request(text: str) -> bool:
     return has_model_word and not any(word in normalized for word in downstream_words)
 
 
+def _build_stage_evidence(
+    text: str,
+    local_intent: StageIntent,
+    llm_intent: StageIntent,
+    prefer_simple_model_advisory: bool,
+) -> Dict[str, Any]:
+    llm_downstream = [stage for stage in llm_intent.stages if stage != "geometry_modeling"]
+    local_downstream = [stage for stage in local_intent.stages if stage != "geometry_modeling"]
+    explicit_geometry_only = local_intent.explicit_scope == "geometry_only"
+    explicit_local_stage = local_intent.explicit_scope in {
+        "explicit_stage",
+        "explicit_multistage",
+        "explicit_limited",
+        "conflicting_explicit",
+    }
+    llm_added_downstream_to_explicit_geometry_only = explicit_geometry_only and bool(llm_downstream)
+    llm_omitted_locally_detected_explicit_stage = explicit_local_stage and any(
+        stage not in llm_intent.stages for stage in local_downstream
+    )
+    severe = (
+        local_intent.has_conflict
+        or llm_intent.has_conflict
+        or llm_added_downstream_to_explicit_geometry_only
+        or llm_omitted_locally_detected_explicit_stage
+    )
+    simple_asset_request = bool(prefer_simple_model_advisory and _is_simple_model_asset_request(text))
+    advisory = (
+        simple_asset_request
+        and not severe
+        and local_intent.stages == ["geometry_modeling"]
+        and bool(llm_downstream)
+        and llm_intent.explicit_scope in {"llm_inferred", "llm_low_confidence_preserved"}
+    )
+    if severe:
+        severity = "severe"
+    elif advisory:
+        severity = "advisory"
+    else:
+        severity = "none"
+    return {
+        "simple_asset_request": simple_asset_request,
+        "local_stages": local_intent.stages,
+        "local_scope": local_intent.explicit_scope,
+        "local_has_conflict": local_intent.has_conflict,
+        "llm_added_downstream_to_explicit_geometry_only": llm_added_downstream_to_explicit_geometry_only,
+        "llm_omitted_locally_detected_explicit_stage": llm_omitted_locally_detected_explicit_stage,
+        "conflict_severity": severity,
+    }
+
+
+def _build_requirement_resolution_prompt(
+    prompt: str,
+    first_intent: StageIntent,
+    local_evidence: Dict[str, Any],
+) -> str:
+    return (
+        "Resolve a severe Blender requirement-assessment conflict before planning.\n"
+        "Return plain JSON only. Use the stage contract exactly.\n\n"
+        "Allowed stages, in order:\n"
+        "- geometry_modeling: mesh/object construction, topology, transforms, booleans, bevels, hierarchy.\n"
+        "- uv_texture_material: UV unwraps, seams, texture setup, simple color assignment, "
+        "material assignment, PBR/material presets.\n"
+        "- environment_lighting: lights, HDR/world/background, scene lighting setup.\n"
+        "- animation: timeline, keyframes, motion, camera/object animation.\n"
+        "- camera_render: render camera, render engine/settings, final still/video output.\n\n"
+        "Resolution policy:\n"
+        "- The final decision is LLM-driven; local evidence is advisory conflict evidence only.\n"
+        "- Honor explicit user exclusions over inferred deliverables.\n"
+        "- If the first LLM result omitted an explicit requested stage, restore that stage.\n"
+        "- If the first LLM result added stages despite an explicit geometry-only request, remove those stages.\n"
+        "- Do not generate modeling steps.\n\n"
+        "Return exactly this JSON shape:\n"
+        "{\n"
+        '  "requested_stages": ["geometry_modeling"],\n'
+        '  "excluded_stages": [],\n'
+        '  "deliverable_level": "model_asset|textured_asset|lit_scene|animation|render_output|ambiguous",\n'
+        '  "explicit_scope": true,\n'
+        '  "confidence": 0.0,\n'
+        '  "reason": "short conflict resolution explanation",\n'
+        '  "risks": []\n'
+        "}\n\n"
+        "FIRST LLM RESULT:\n"
+        f"{json.dumps(first_intent.__dict__, ensure_ascii=False)}\n\n"
+        "LOCAL EVIDENCE:\n"
+        f"{json.dumps(local_evidence, ensure_ascii=False)}\n\n"
+        "USER REQUEST:\n"
+        f"{extract_stage_selection_text(prompt)}"
+    )
+
+
 async def call_plan_with_format_retry(
     client: Any,
     adapter: Any,
@@ -143,25 +233,55 @@ async def assess_adaptive_stage_intent(client: Any, prompt: str) -> StageIntent:
             fallback,
             low_confidence_threshold=low_confidence_threshold,
         )
-        if (
-            bool(cfg.get("prefer_geometry_for_simple_model_requests", True))
-            and _is_simple_model_asset_request(text)
-            and local_intent.stages == ["geometry_modeling"]
-            and intent.stages != ["geometry_modeling"]
-            and intent.explicit_scope in {"llm_inferred", "llm_low_confidence_preserved"}
-        ):
+        local_evidence = _build_stage_evidence(
+            text,
+            local_intent,
+            intent,
+            bool(cfg.get("prefer_geometry_for_simple_model_requests", True)),
+        )
+        if local_evidence["conflict_severity"] == "advisory":
             print(
-                "[VBF] requirement_assessment stage_guard=geometry_model_only "
+                "[VBF] requirement_assessment local_advisory=simple_model_downstream "
                 f"llm_stages={','.join(intent.stages)} "
-                f"local_scope={local_intent.explicit_scope}"
+                f"local_scope={local_evidence['local_scope']}"
             )
-            intent = StageIntent(
-                stages=["geometry_modeling"],
-                primary_stage="geometry_modeling",
-                confidence=max(intent.confidence, local_intent.confidence),
-                explicit_scope="local_simple_model_guard",
-                has_conflict=local_intent.has_conflict,
+        elif local_evidence["conflict_severity"] == "severe":
+            print(
+                "[VBF] requirement_assessment conflict_resolution=llm_second_pass "
+                f"llm_stages={','.join(intent.stages)} "
+                f"local_stages={','.join(local_intent.stages)}"
             )
+            try:
+                resolution_prompt = _build_requirement_resolution_prompt(
+                    prompt,
+                    intent,
+                    local_evidence,
+                )
+                resolution_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You resolve Blender task requirement conflicts before planning. "
+                            "Return one strict JSON object only."
+                        ),
+                    },
+                    {"role": "user", "content": resolution_prompt},
+                ]
+                resolution_payload = await asyncio.wait_for(
+                    client._adapter_call(resolution_messages),
+                    timeout=timeout_seconds,
+                )
+                intent = client._normalize_assessed_stage_intent(
+                    resolution_payload,
+                    intent,
+                    low_confidence_threshold=low_confidence_threshold,
+                )
+            except Exception as resolution_error:
+                print(
+                    "[VBF] requirement_assessment "
+                    "conflict_resolution_failed_using_first_llm: "
+                    f"{resolution_error}"
+                )
         print(
             "[VBF] requirement_assessment "
             f"stages={','.join(intent.stages)} "

@@ -4,6 +4,25 @@ This project follows a Keep a Changelog style structure.
 
 The entries below focus on meaningful user-facing, architecture, and workflow changes rather than listing every commit.
 
+## [2.3.2] - 2026-04-28
+
+### Changed
+
+- Changed default prompt styling so CLI/runtime tasks no longer prepend a style template unless the user explicitly passes `--style`.
+- Changed adaptive requirement assessment to remain LLM-first in `auto` mode; local simple-model checks now provide advisory evidence instead of directly overriding LLM stages.
+- Clarified the `uv_texture_material` stage contract to include UVs, texture setup, simple color assignment, material assignment, and PBR/material presets.
+- Changed feedback Analyzer triggering to use major/adaptive analysis stage boundaries instead of every plan sub-stage transition.
+
+### Fixed
+
+- Fixed simple asset prompts with explicit colors/materials being reduced to geometry-only by the local simple-model guard.
+- Fixed noisy Analyzer parse fallback for near-valid JSON responses by repairing simple missing JSON closers before falling back to failure-payload recovery.
+
+### Docs
+
+- Updated README and README_CN to describe LLM-first requirement assessment, advisory local evidence, reduced Analyzer frequency, and the expanded `uv_texture_material` contract.
+- Added release notes and GitHub release automation that reads the release version from `pyproject.toml`; versions use numeric `x.x.x` format with multi-digit segments supported, automatic GitHub Releases are limited to major/minor `x.y.0` versions, and manual releases may publish any project `x.x.x` version.
+
 ## [2.3.1] - 2026-04-27
 
 ### Added
