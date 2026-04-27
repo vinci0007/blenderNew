@@ -1,0 +1,60 @@
+Traceback (most recent call last):
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\config\_retest_run.py", line 68, in <module>
+    asyncio.run(main())
+    ~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\qylw4\AppData\Roaming\uv\python\cpython-3.13.2-windows-x86_64-none\Lib\asyncio\runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\qylw4\AppData\Roaming\uv\python\cpython-3.13.2-windows-x86_64-none\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\qylw4\AppData\Roaming\uv\python\cpython-3.13.2-windows-x86_64-none\Lib\asyncio\base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\config\_retest_run.py", line 28, in main
+    result = await client.run_task_with_feedback(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\app\client.py", line 1114, in run_task_with_feedback
+    return await run_task_with_feedback_impl(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\app\task_execution.py", line 315, in run_task_with_feedback
+    await client.ensure_connected()
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\app\client.py", line 313, in ensure_connected
+    await self._start_blender_headless()
+  File "E:\0001_Work_New\013_Work_Git\0003_AI\00001_design\blenderNew\vbf\app\client.py", line 1041, in _start_blender_headless
+    subprocess.Popen(
+    ~~~~~~~~~~~~~~~~^
+        [self.blender_path, "-b", "-P", self.start_script_path],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        env=env,
+        ^^^^^^^^
+    )
+    ^
+  File "C:\Users\qylw4\AppData\Roaming\uv\python\cpython-3.13.2-windows-x86_64-none\Lib\subprocess.py", line 1038, in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        pass_fds, cwd, env,
+                        ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+                        gid, gids, uid, umask,
+                        ^^^^^^^^^^^^^^^^^^^^^^
+                        start_new_session, process_group)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\qylw4\AppData\Roaming\uv\python\cpython-3.13.2-windows-x86_64-none\Lib\subprocess.py", line 1550, in _execute_child
+    hp, ht, pid, tid = _winapi.CreateProcess(executable, args,
+                       ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+                             # no special security
+                             ^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+                             cwd,
+                             ^^^^
+                             startupinfo)
+                             ^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] 系统找不到指定的文件。

@@ -22,7 +22,7 @@ def gpencil_add_blank(
     try:
         loc = vec3(location)
 
-        bpy.ops.object.gpencil_add(
+        bpy.ops.object.grease_pencil_add(
             type="EMPTY",
             location=loc,
         )
@@ -399,27 +399,15 @@ def gpencil_convert_to_mesh(
 
         set_active_object(obj)
 
-        # Convert to curve first, then mesh
-        bpy.ops.gpencil.convert(
-            type="CURVE",
-            use_timing_data=False,
-        )
+        bpy.ops.object.convert(target="MESH", thickness=thickness)
+        mesh_obj = bpy.context.active_object
+        if not mesh_obj or mesh_obj.type != "MESH":
+            raise RuntimeError("Grease Pencil to mesh conversion did not produce a mesh")
 
-        # Get the converted curve
-        curve_obj = bpy.context.active_object
-        if curve_obj and curve_obj.type == "CURVE":
-            curve_obj.data.bevel_depth = thickness
+        if new_name:
+            mesh_obj.name = new_name
 
-            # Convert curve to mesh
-            bpy.ops.object.convert(target="MESH")
-            mesh_obj = bpy.context.active_object
-
-            if new_name:
-                mesh_obj.name = new_name
-
-            return {"object_name": obj.name, "mesh_name": mesh_obj.name}
-
-        return {"object_name": obj.name, "converted": False}
+        return {"object_name": obj.name, "mesh_name": mesh_obj.name}
     except Exception as e:
         raise fmt_err("gpencil_convert_to_mesh failed", e)
 
@@ -444,10 +432,7 @@ def gpencil_convert_to_curve(
 
         set_active_object(obj)
 
-        bpy.ops.gpencil.convert(
-            type="CURVE",
-            use_timing_data=False,
-        )
+        bpy.ops.object.convert(target="CURVE")
 
         curve_obj = bpy.context.active_object
         if new_name and curve_obj:
@@ -475,7 +460,12 @@ def set_gpencil_brush(
     """
     try:
         tool_settings = bpy.context.tool_settings
-        gp_paint = tool_settings.gpencil_paint
+        gp_paint = (
+            getattr(tool_settings, "gpencil_paint", None)
+            or getattr(tool_settings, "grease_pencil_paint", None)
+        )
+        if gp_paint is None:
+            raise RuntimeError("Grease Pencil paint settings are not available")
 
         # Find brush
         brush = None
@@ -486,7 +476,10 @@ def set_gpencil_brush(
 
         if not brush:
             # Create simple brush
-            brush = bpy.data.brushes.new(name=brush_name, mode="GPENCIL_PAINT")
+            try:
+                brush = bpy.data.brushes.new(name=brush_name, mode="GPENCIL_PAINT")
+            except TypeError:
+                brush = bpy.data.brushes.new(name=brush_name, mode="GREASE_PENCIL")
 
         gp_paint.brush = brush
         brush.size = int(size)

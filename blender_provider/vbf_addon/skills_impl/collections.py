@@ -56,8 +56,8 @@ def link_to_collection(object_name: str, collection_name: str) -> Dict[str, Any]
         if not coll:
             raise ValueError(f"Collection not found: {collection_name}")
 
-        # Unlink from current collections first if isolate mode needed
-        coll.objects.link(obj)
+        if obj.name not in coll.objects:
+            coll.objects.link(obj)
 
         return {"object_name": obj.name, "collection_name": coll.name, "linked": True}
     except Exception as e:

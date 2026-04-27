@@ -293,7 +293,7 @@ async def generate_skill_plan(
     if llm is None:
         raise ValueError(
             "LLM is not configured. Please set VBF_LLM_API_KEY and VBF_LLM_BASE_URL "
-            "or configure vbf/config/config.json"
+            "or configure vbf/config/config.toml"
         )
 
     skill_schemas = await describe_skills_func(allowed_skills)

@@ -16,6 +16,7 @@ wheels/
 
 # VBF secrets & runtime state
 vbf/config/config.json
+vbf/config/config.toml
 assets/blender_python_reference_5_1.zip
 /assets/blender_python_reference_5_1
 docs/VBF_SKILLS_PATTERN_ANALYSIS.md
@@ -34,6 +35,7 @@ find-buddy.bat
 tests/task_tmp/*
 !tests/task_tmp/.gitkeep
 !tests/task_tmp/README.md
+!tests/task_tmp/conftest.py
 CLAUDE.md.bak
 CLAUDE.md
 .claude/settings.local.json
@@ -56,6 +58,7 @@ docs/archived/TASK_STATE_SNAPSHOT_2026-04-13.md
 docs/unregistered_skills/LOW_FREQUENCY_API_REFERENCE.md
 docs/archived/architecture_analysis.md
 vbf/config/config.json.copy
+vbf/config/config.toml.copy
 TASK_STATE_SNAPSHOT.md
 /vbf/agent/memory/test-history
 /vbf/agent/memory/test-msgs
@@ -70,8 +73,12 @@ assets/prompt_test copy.md
 tests/test_client_plan_retry.py
 tests/test_openai_compat_adapter_response_format.py
 tests/test_plan_normalization.py
-/tests/task_tmp
 /.tmp_runtime_cfg
 /vbf/logs
 docs/to_do_plan.md
 docs/to_do_plan.md
+/.pytest_tmp
+/.pytest_tmp_escalated
+/.pytest_tmp_run
+tests/test_addon_self_check.py
+/tests/task_tmp

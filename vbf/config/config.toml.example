@@ -1,0 +1,117 @@
+# 项目级运行路径配置
+[project.paths]
+# 运行时缓存目录，用于保存任务状态、LLM 缓存等临时文件
+cache_dir = "vbf/cache"
+# 运行日志目录，用于保存重测输出和错误日志
+logs_dir = "vbf/logs"
+# 任务中断/恢复状态文件路径
+task_state_file = "vbf/cache/task_state.json"
+# 最近一次 LLM 生成或解析失败的详细记录文件
+last_gen_fail_file = "vbf/cache/last_gen_fail.txt"
+# 最近一次规划失败的记录文件
+last_plan_fail_file = "vbf/cache/last_plan_fail.txt"
+# 最近一次原始规划响应保存文件
+last_plan_raw_file = "vbf/cache/last_plan_raw.txt"
+# LLM 响应磁盘缓存目录
+llm_cache_dir = "vbf/cache/llm_cache"
+
+# 新建模任务的场景上下文策略：
+# - isolate: 默认，仅把本任务新建对象（以及可选相机/灯光）提供给 LLM 规划/反馈，避免旧模型污染新任务。
+# - all: 保留完整 Blender 场景上下文，适合明确要基于当前场景继续编辑的任务。
+[project.scene]
+task_scene_policy = "isolate"
+include_environment_objects = true
+
+# LLM 接入、规划模式、需求评估和限流配置
+[llm]
+# 是否启用 LLM。关闭后无法进行智能规划
+use_llm = true
+# OpenAI 兼容接口的基础地址
+base_url = "https://api.openai.com/v1"
+# LLM API Key，请在实际配置中替换
+api_key = "YOUR_API_KEY"
+# 用于规划和需求评估的模型名称
+model = "gpt-4o-mini"
+# LLM 采样温度，规划任务建议较低以提升稳定性
+temperature = 0.2
+# 聊天补全接口路径，代理服务不同时可调整
+chat_completions_path = "/v1/chat/completions"
+# 是否使用代理 API。启用后会兼容部分代理服务差异
+is_proxy_api = false
+# 是否发送 request_headers 中定义的额外请求头
+enable_extra_request_headers = false
+# 是否启用 curl 风格 HTTP 兼容模式，用于部分代理或网关
+use_curl_http_compat = false
+# 是否请求模型返回 JSON object 格式，提高规划解析稳定性
+use_response_format_json_object = true
+# 是否允许低层网关能力，通常保持关闭
+allow_low_level_gateway = false
+# 是否在需要时自动允许低层网关能力
+auto_allow_low_level_gateway = true
+# 是否使用函数调用能力。auto 表示由适配器和模型能力自动决定
+use_function_calling = "auto"
+# 是否优先使用流式响应。auto 表示先探测，支持时使用，不支持时降级非流式
+use_streaming = "auto"
+# 规划模式。adaptive_staged 会按需求阶段拆分规划
+planning_mode = "adaptive_staged"
+
+# 额外 HTTP 请求头。仅在 enable_extra_request_headers=true 时生效
+[llm.request_headers]
+User-Agent = "curl/8.8.0"
+
+# 规划上下文压缩和技能子集选择策略
+[llm.planning_context]
+# 技能上下文压缩模式。capability_coverage 会优先覆盖阶段所需能力
+compression_mode = "capability_coverage"
+# 规划提示目标字符预算，用于限制技能上下文体积
+target_prompt_budget_chars = 18000
+# 必要能力超出预算时是否允许溢出，避免关键技能被裁掉
+allow_budget_overflow_for_required_capabilities = true
+# 技能子集不足时是否允许回退到完整技能列表。开启会增加 token 和超时风险
+allow_full_skill_fallback = false
+# 是否为必要技能包含紧凑参数 schema
+include_compact_schema_for_required = true
+# 是否为高风险技能包含紧凑参数 schema，减少参数名错误
+include_compact_schema_for_high_risk = true
+
+# 正式规划前的用户需求阶段评估
+[llm.requirement_assessment]
+# 需求评估模式。auto/always 会调用 LLM；off 需同时 enable_local_fallback=true 才能使用本地规则
+mode = "auto"
+# 需求评估 LLM 调用超时时间，建议短于正式规划
+timeout_seconds = 45
+# 是否启用本地硬编码阶段判断作为兜底。默认 false，关闭时只依赖 LLM 评估，LLM 失败会中断而非回退
+enable_local_fallback = false
+# 仅当 enable_local_fallback=true 且 mode=auto 时生效；本地置信度低于该值才调用 LLM
+use_llm_when_confidence_below = 1.0
+# 仅当 enable_local_fallback=true 时生效；本地兜底策略，preserve_more_stages 表示低置信度保留更多阶段
+fallback_policy = "preserve_more_stages"
+# LLM 评估低置信度阈值；低于该值且非明确范围时，会保守保留下游阶段
+low_confidence_threshold = 0.7
+# 对“制作一个 X 3D 模型”这类简单资产请求，默认只规划几何建模阶段，避免自动扩展到 UV/材质/灯光。
+prefer_geometry_for_simple_model_requests = true
+
+# 规划前能力探测配置，用于确认模型/接口能力
+[llm.planning_capability_probe]
+# 是否启用规划能力探测
+enabled = true
+# 能力探测超时时间
+timeout_seconds = 20
+# 能力探测结果缓存时间，单位秒
+cache_ttl_seconds = 3600
+
+# LLM API 限流与重试配置
+[llm.llm_api_throttling]
+# 最大并发 LLM 调用数
+max_concurrent_calls = 3
+# 每分钟最大 LLM 调用数
+max_calls_per_minute = 20
+# 单次 LLM 调用超时时间
+call_timeout_seconds = 600
+
+# LLM 调用失败后的重试策略
+[llm.llm_api_throttling.retry_on_failure]
+# 最大重试次数
+max_attempts = 3
+# 每次重试之间的等待秒数
+delay_between_attempts_seconds = 1.0

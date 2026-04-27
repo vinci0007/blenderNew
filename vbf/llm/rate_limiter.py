@@ -31,7 +31,7 @@ class LLM_API_Throttle_Config:
 
     @classmethod
     def from_config_dict(cls, config: Dict[str, Any]) -> "LLM_API_Throttle_Config":
-        """Create config from dict loaded from vbf/config/config.json.
+        """Create config from dict loaded from vbf/config/config.toml.
 
         Looks for key: "llm_api_throttling"
         """
@@ -153,7 +153,7 @@ class RateLimiter:
                     else:
                         raise TimeoutError(
                             f"LLM call timed out after {self.config.call_timeout_seconds}s. "
-                            "Consider increasing llm_api_throttling.call_timeout_seconds in config.json."
+                            "Consider increasing llm_api_throttling.call_timeout_seconds in config.toml."
                         ) from None
                 except Exception as e:
                     # Other errors: check if retryable (rate limit / server errors)
@@ -207,7 +207,7 @@ class RateLimiter:
 class LLMRateLimiter:
     """Singleton-style rate limiter for LLM operations.
 
-    Loads configuration from vbf/config/config.json and provides
+    Loads configuration from vbf/config/config.toml and provides
 global rate limiting across all LLM calls.
     """
 

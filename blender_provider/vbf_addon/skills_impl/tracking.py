@@ -176,9 +176,6 @@ def tracking_set_camera(
         bg = cam.data.background_images.new()
         bg.clip = clip
 
-        # Set camera from tracking
-        bpy.ops.clip.set_camera()
-
         return {
             "clip_name": clip.name,
             "camera_name": cam.name,

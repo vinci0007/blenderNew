@@ -194,13 +194,17 @@ def texture_paint_fill(
         if bpy.context.mode != "PAINT_TEXTURE":
             bpy.ops.object.mode_set(mode="TEXTURE_PAINT")
 
-        # Use fill operator
-        bpy.ops.paint.image_paint(
-            mode="INVERT",  # This actually triggers fill with color
-            color=color,
-        )
+        img = bpy.context.tool_settings.image_paint.canvas
+        if not img:
+            raise ValueError("No active texture paint image/canvas")
 
-        return {"object_name": obj.name, "filled": True}
+        rgba = list(color[:4])
+        if len(rgba) < 4:
+            rgba.extend([1.0] * (4 - len(rgba)))
+        img.pixels.foreach_set((rgba * (img.size[0] * img.size[1]))[: len(img.pixels)])
+        img.update()
+
+        return {"object_name": obj.name, "image_name": img.name, "filled": True}
     except Exception as e:
         raise fmt_err("texture_paint_fill failed", e)
 
@@ -576,9 +580,8 @@ def weight_paint_set(
         if bpy.context.mode != "PAINT_WEIGHT":
             bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
 
-        # Set weight for all in group
         vg = obj.vertex_groups[vertex_group]
-        bpy.ops.paint.weight_set(value=weight)
+        vg.add([vertex.index for vertex in obj.data.vertices], weight, "REPLACE")
 
         return {
             "object_name": obj.name,

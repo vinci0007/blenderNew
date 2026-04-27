@@ -21,13 +21,23 @@ def _ensure_module_path() -> None:
 _ensure_module_path()
 
 def _import_addon_module():
-    # Preferred: standalone addon package installed in Blender addons directory.
-    try:
-        return importlib.import_module("vbf_addon")
-    except Exception:
-        pass
-    # Fallback: repo-local package layout.
-    return importlib.import_module("blender_provider.vbf_addon")
+    prefer_installed = os.getenv("VBF_PREFER_INSTALLED_ADDON", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    module_order = ["vbf_addon", "blender_provider.vbf_addon"]
+    if not prefer_installed:
+        module_order = ["blender_provider.vbf_addon", "vbf_addon"]
+
+    last_error = None
+    for module_name in module_order:
+        try:
+            return importlib.import_module(module_name)
+        except Exception as exc:
+            last_error = exc
+    raise last_error
 
 
 vbf_addon = _import_addon_module()

@@ -1,21 +1,26 @@
 ﻿from __future__ import annotations
 
-import json
 import os
+import tomllib
 from pathlib import Path
 from typing import Any, Dict
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PACKAGE_DIR.parent
-_DEFAULT_CONFIG_PATH = _REPO_ROOT / "vbf" / "config" / "config.json"
-_LEGACY_CONFIG_FILENAMES = {"llm_config.json"}
+_DEFAULT_CONFIG_PATH = _REPO_ROOT / "vbf" / "config" / "config.toml"
+_LEGACY_CONFIG_FILENAMES = {"llm_config.json", "config.json"}
 
 
 def _assert_supported_config_name(cfg_path: Path) -> None:
     if cfg_path.name.lower() in _LEGACY_CONFIG_FILENAMES:
         raise ValueError(
-            "Legacy config filename 'llm_config.json' is no longer supported. "
-            "Use 'config.json' instead."
+            f"Legacy config filename '{cfg_path.name}' is no longer supported. "
+            "Use 'config.toml' instead."
+        )
+    if cfg_path.suffix.lower() != ".toml":
+        raise ValueError(
+            f"Unsupported config format '{cfg_path.suffix or cfg_path.name}'. "
+            "Use a TOML config file such as 'config.toml'."
         )
 
 
@@ -102,12 +107,13 @@ def load_full_config(config_path: str | None = None) -> Dict[str, Any]:
 
     if cfg_path.exists():
         with open(cfg_path, "r", encoding="utf-8-sig") as f:
-            loaded = json.load(f)
+            loaded = tomllib.loads(f.read())
             if isinstance(loaded, dict):
                 raw = loaded
 
     project_raw = raw.get("project") if isinstance(raw.get("project"), dict) else {}
     paths_raw = project_raw.get("paths") if isinstance(project_raw.get("paths"), dict) else {}
+    scene_raw = project_raw.get("scene") if isinstance(project_raw.get("scene"), dict) else {}
     paths = _normalize_project_paths(paths_raw)
     _ensure_runtime_dirs(paths)
 
@@ -116,6 +122,10 @@ def load_full_config(config_path: str | None = None) -> Dict[str, Any]:
     return {
         "project": {
             "paths": paths,
+            "scene": {
+                "task_scene_policy": str(scene_raw.get("task_scene_policy", "isolate")),
+                "include_environment_objects": bool(scene_raw.get("include_environment_objects", True)),
+            },
         },
         "llm": llm,
     }
@@ -124,6 +134,11 @@ def load_full_config(config_path: str | None = None) -> Dict[str, Any]:
 def load_project_paths(config_path: str | None = None) -> Dict[str, str]:
     full = load_full_config(config_path)
     return full["project"]["paths"]
+
+
+def load_project_scene_config(config_path: str | None = None) -> Dict[str, Any]:
+    full = load_full_config(config_path)
+    return full["project"]["scene"]
 
 
 def load_llm_section(config_path: str | None = None) -> Dict[str, Any]:

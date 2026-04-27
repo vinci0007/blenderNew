@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import json
+import re
 
 from ..core.scene_state import SceneState
 
@@ -198,13 +199,16 @@ Always return valid JSON matching the requested format exactly."""},
             response = await self.client._adapter_call(messages)
             return self._parse_analysis_response(response)
         except Exception as e:
+            recovered = self._recover_analysis_from_last_failure(e)
+            if recovered is not None:
+                print(f"[Analyzer] LLM analysis parse fallback used: {e}")
+                return recovered
             print(f"[Analyzer] LLM analysis failed: {e}")
-            # Return a neutral fallback
             return GeometryAnalysis(
-                quality="good",
-                reason=f"Analysis failed, assuming acceptable quality",
-                suggestions=["Consider manual inspection"],
-                score=0.5,
+                quality="warning",
+                reason="Analysis failed to parse; manual inspection recommended",
+                suggestions=["Inspect the stage manually before continuing"],
+                score=0.45,
                 critical_issues=[str(e)],
             )
 
@@ -243,6 +247,57 @@ Always return valid JSON matching the requested format exactly."""},
             score=score,
             critical_issues=self._ensure_list(response.get("critical_issues", [])),
             recommendations=response.get("recommendations", {}),
+        )
+
+    def _recover_analysis_from_last_failure(self, error: Exception) -> Optional[GeometryAnalysis]:
+        """Best-effort parse fallback for non-strict analyzer JSON."""
+        if "LLM parse error" not in str(error):
+            return None
+        try:
+            paths = getattr(self.client, "_runtime_paths", {}) or {}
+            path = paths.get("last_gen_fail_file")
+            if not path:
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.loads(f.read())
+            raw = str(payload.get("raw_content") or payload.get("extracted_json") or "")
+        except Exception:
+            return None
+        if not raw:
+            return None
+
+        def _match_string(name: str) -> str:
+            match = re.search(rf'"{name}"\s*:\s*"((?:\\.|[^"\\])*)"', raw, re.S)
+            if not match:
+                return ""
+            try:
+                return json.loads(f'"{match.group(1)}"')
+            except Exception:
+                return match.group(1)
+
+        quality = (_match_string("quality") or "warning").lower()
+        if quality not in {"good", "warning", "bad"}:
+            quality = "warning"
+        score_match = re.search(r'"score"\s*:\s*([0-9]+(?:\.[0-9]+)?)', raw)
+        try:
+            score = float(score_match.group(1)) if score_match else 0.45
+        except Exception:
+            score = 0.45
+        reason = _match_string("reason") or "Recovered partial analyzer response from invalid JSON"
+        suggestions = re.findall(r'"suggestions"\s*:\s*\[(.*?)\]', raw, re.S)
+        suggestion_items: List[str] = []
+        if suggestions:
+            for item in re.findall(r'"((?:\\.|[^"\\])*)"', suggestions[0]):
+                try:
+                    suggestion_items.append(json.loads(f'"{item}"'))
+                except Exception:
+                    suggestion_items.append(item)
+        return GeometryAnalysis(
+            quality=quality,
+            reason=reason,
+            suggestions=suggestion_items[:8],
+            score=max(0.0, min(1.0, score)),
+            critical_issues=[f"Recovered from analyzer parse error: {error}"],
         )
 
     def _ensure_list(self, value) -> List[str]:

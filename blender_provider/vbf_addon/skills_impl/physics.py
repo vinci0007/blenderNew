@@ -85,9 +85,6 @@ def rigidbody_set_mass(
 
         rb.mass = mass
 
-        if calculate_center:
-            bpy.ops.rigidbody.mass_calculate(mesh_compartment_multiplier=1.0)
-
         return {"object_name": obj.name, "mass": rb.mass}
     except Exception as e:
         raise fmt_err("rigidbody_set_mass failed", e)
@@ -199,11 +196,8 @@ def rigidbody_bake(
             scene.rigidbody_world.point_cache.frame_end = int(end)
 
             # Bake to action
-            bpy.ops.ptcache.bake(
-                {"point_cache": scene.rigidbody_world.point_cache},
-                frame_start=int(start),
-                frame_end=int(end),
-            )
+            with bpy.context.temp_override(point_cache=scene.rigidbody_world.point_cache):
+                bpy.ops.ptcache.bake(bake=True)
 
         return {"baked": True, "start": int(start), "end": int(end)}
     except Exception as e:
@@ -342,11 +336,8 @@ def cloth_bake(
         cloth_mod.point_cache.frame_start = int(start)
         cloth_mod.point_cache.frame_end = int(end)
 
-        bpy.ops.ptcache.bake(
-            {"point_cache": cloth_mod.point_cache},
-            frame_start=int(start),
-            frame_end=int(end),
-        )
+        with bpy.context.temp_override(point_cache=cloth_mod.point_cache):
+            bpy.ops.ptcache.bake(bake=True)
 
         return {
             "object_name": obj.name,

@@ -740,6 +740,61 @@ def _tcp_probe(host: str, port: int, timeout_s: float = 1.0) -> tuple[bool, str]
     except Exception as e:
         return False, f"TCP probe failed at {probe_host}:{port}: {e}"
 
+
+async def _async_ws_jsonrpc_probe(uri: str, timeout_s: float = 3.0) -> tuple[bool, str, Dict[str, Any]]:
+    if websockets is None:
+        return False, "WebSocket probe unavailable: websockets package missing", {}
+
+    try:
+        async with websockets.connect(uri, open_timeout=timeout_s, close_timeout=timeout_s) as websocket:
+            request = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "vbf.get_capabilities",
+                "params": {},
+            }
+            await websocket.send(json.dumps(request))
+            raw_response = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+    except Exception as e:
+        return False, f"WebSocket/JSON-RPC probe failed at {uri}: {e}", {}
+
+    try:
+        payload = json.loads(raw_response)
+    except Exception as e:
+        return False, f"WebSocket probe received invalid JSON at {uri}: {e}", {}
+
+    if not isinstance(payload, dict):
+        return False, f"WebSocket probe received non-object payload at {uri}", {}
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message", "Unknown JSON-RPC error"))
+        return False, f"JSON-RPC probe failed at {uri}: {message}", {}
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return False, f"JSON-RPC probe missing result object at {uri}", {}
+
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return False, f"JSON-RPC probe missing data payload at {uri}", {}
+
+    return True, f"WebSocket/JSON-RPC reachable at {uri}", data
+
+
+def _ws_jsonrpc_probe(host: str, port: int, timeout_s: float = 3.0) -> tuple[bool, str, Dict[str, Any]]:
+    probe_host = _normalize_probe_host(host)
+    uri = f"ws://{probe_host}:{int(port)}"
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_async_ws_jsonrpc_probe(uri, timeout_s=timeout_s))
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
+
 def run_self_check() -> Dict[str, Any]:
     """Run one-click runtime self-check for addon status and local connectivity."""
     global _LAST_SELF_CHECK
@@ -760,6 +815,13 @@ def run_self_check() -> Dict[str, Any]:
         "message": tcp_message,
     })
 
+    ws_ok, ws_message, ws_capabilities = _ws_jsonrpc_probe(server.host, server.port)
+    checks.append({
+        "name": "ws_jsonrpc_reachable",
+        "ok": bool(ws_ok),
+        "message": ws_message,
+    })
+
     skill_count = len(SKILL_REGISTRY)
     checks.append({
         "name": "skill_registry_loaded",
@@ -769,7 +831,9 @@ def run_self_check() -> Dict[str, Any]:
 
     capabilities: Dict[str, Any] = {}
     try:
-        capabilities = server._get_capabilities() if hasattr(server, "_get_capabilities") else {}
+        capabilities = ws_capabilities or (
+            server._get_capabilities() if hasattr(server, "_get_capabilities") else {}
+        )
     except Exception:
         capabilities = {}
     features = capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
@@ -784,6 +848,7 @@ def run_self_check() -> Dict[str, Any]:
     summary = (
         f"running={'yes' if server.running else 'no'}, "
         f"tcp={'yes' if tcp_ok else 'no'}, "
+        f"ws={'yes' if ws_ok else 'no'}, "
         f"skills={skill_count}"
     )
     result = {

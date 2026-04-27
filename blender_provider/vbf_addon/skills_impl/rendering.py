@@ -6,6 +6,29 @@ import bpy
 from .utils import fmt_err
 
 
+def _set_render_engine_safe(scene: bpy.types.Scene, engine: str) -> str:
+    requested = str(engine or "BLENDER_EEVEE").strip()
+    aliases = {
+        "eevee": "BLENDER_EEVEE",
+        "eevee_next": "BLENDER_EEVEE",
+        "blender_eevee_next": "BLENDER_EEVEE",
+        "cycles": "CYCLES",
+        "workbench": "BLENDER_WORKBENCH",
+    }
+    primary = aliases.get(requested.lower(), requested.upper())
+    if primary == "BLENDER_EEVEE_NEXT":
+        primary = "BLENDER_EEVEE"
+
+    last_error = None
+    for candidate in [primary]:
+        try:
+            scene.render.engine = candidate
+            return scene.render.engine
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(f"Unsupported render engine {engine!r}: {last_error}")
+
+
 def render_image(
     filepath: Optional[str] = None,
     width: Optional[int] = None,
@@ -34,7 +57,14 @@ def render_image(
 
         import time
         start = time.time()
-        bpy.ops.render.render(write_file=True)
+        try:
+            bpy.ops.render.render(write_still=True)
+        except Exception as render_err:
+            # Blender operator keywords changed across versions; fall back to
+            # the no-argument call if this runtime does not accept write_still.
+            if "keyword" not in str(render_err).lower() and "unrecognized" not in str(render_err).lower():
+                raise
+            bpy.ops.render.render()
         elapsed = time.time() - start
 
         return {
@@ -47,19 +77,19 @@ def render_image(
 
 
 def set_render_engine(
-    engine: str = "BLENDER_EEVEE_NEXT",
+    engine: str = "BLENDER_EEVEE",
 ) -> Dict[str, Any]:
     """Set the active render engine.
 
     Args:
-        engine: Render engine (BLENDER_EEVEE_NEXT, CYCLES, BLENDER_WORKBENCH).
+        engine: Render engine (BLENDER_EEVEE, CYCLES, BLENDER_WORKBENCH).
 
     Returns:
         {"engine": str}
     """
     try:
         scene = bpy.context.scene
-        scene.render.engine = engine
+        engine = _set_render_engine_safe(scene, engine)
         return {"engine": scene.render.engine}
     except Exception as e:
         raise fmt_err("set_render_engine failed", e)
@@ -355,8 +385,15 @@ def set_eevee_samples(
     """
     try:
         scene = bpy.context.scene
-        scene.eevee.taa_render_samples = samples
+        eevee = getattr(scene, "eevee", None) or getattr(scene, "eevee_next", None)
+        if eevee is None:
+            raise RuntimeError("Eevee settings are not available on this Blender scene")
 
-        return {"samples": samples}
+        for attr in ("taa_render_samples", "render_samples", "samples"):
+            if hasattr(eevee, attr):
+                setattr(eevee, attr, samples)
+                return {"samples": samples, "property": attr}
+
+        raise RuntimeError("No supported Eevee sample property found")
     except Exception as e:
         raise fmt_err("set_eevee_samples failed", e)

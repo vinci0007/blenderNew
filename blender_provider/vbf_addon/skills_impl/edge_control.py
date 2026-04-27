@@ -8,6 +8,33 @@ import bmesh
 from .utils import fmt_err, set_active_object, ensure_object_mode
 
 
+def _edge_float_layer(
+    bm: bmesh.types.BMesh,
+    legacy_accessor_name: str,
+    attribute_names: List[str],
+    create: bool = False,
+):
+    layers = bm.edges.layers
+    legacy_accessor = getattr(layers, legacy_accessor_name, None)
+    if legacy_accessor is not None:
+        layer = legacy_accessor.active
+        if layer is None and create:
+            layer = legacy_accessor.new()
+        if layer is not None:
+            return layer
+
+    float_layers = getattr(layers, "float", None)
+    if float_layers is not None:
+        for name in attribute_names:
+            layer = float_layers.get(name)
+            if layer is not None:
+                return layer
+        if create and attribute_names:
+            return float_layers.new(attribute_names[0])
+
+    return None
+
+
 def mark_edge_crease(
     object_name: str,
     edges: List[int],
@@ -58,7 +85,12 @@ def mark_edge_crease(
             if edge_idx < len(bm.edges):
                 edge = bm.edges[edge_idx]
                 # Set crease value directly on edge layer
-                crease_layer = bm.edges.layers.crease.active
+                crease_layer = _edge_float_layer(
+                    bm,
+                    "crease",
+                    ["crease_edge", "edge_creases", "crease"],
+                    create=True,
+                )
                 if crease_layer:
                     edge[crease_layer] = max(0.0, min(1.0, float(crease_value)))
                 marked_count += 1
@@ -108,7 +140,11 @@ def clear_edge_crease(
         bm = bmesh.from_edit_mesh(obj.data)
         bm.edges.ensure_lookup_table()
 
-        crease_layer = bm.edges.layers.crease.active
+        crease_layer = _edge_float_layer(
+            bm,
+            "crease",
+            ["crease_edge", "edge_creases", "crease"],
+        )
         if not crease_layer:
             bpy.ops.object.mode_set(mode="OBJECT")
             return {"ok": True, "object_name": object_name, "edges_cleared": 0}
@@ -172,10 +208,12 @@ def set_edge_bevel_weight(
         bm.edges.ensure_lookup_table()
 
         # Get bevel weight layer
-        bevel_weight_layer = bm.edges.layers.bevel_weight.active
-        if not bevel_weight_layer:
-            # Create bevel weight layer if it doesn't exist
-            bevel_weight_layer = bm.edges.layers.bevel_weight.new()
+        bevel_weight_layer = _edge_float_layer(
+            bm,
+            "bevel_weight",
+            ["bevel_weight_edge", "edge_bevel_weight", "bevel_weight"],
+            create=True,
+        )
 
         weight_value = max(0.0, min(1.0, float(weight)))
         set_count = 0
@@ -224,7 +262,11 @@ def clear_edge_bevel_weight(
         bm = bmesh.from_edit_mesh(obj.data)
         bm.edges.ensure_lookup_table()
 
-        bevel_weight_layer = bm.edges.layers.bevel_weight.active
+        bevel_weight_layer = _edge_float_layer(
+            bm,
+            "bevel_weight",
+            ["bevel_weight_edge", "edge_bevel_weight", "bevel_weight"],
+        )
         if not bevel_weight_layer:
             bpy.ops.object.mode_set(mode="OBJECT")
             return {"ok": True, "object_name": object_name, "edges_cleared": 0}
@@ -281,8 +323,16 @@ def get_edge_data(
         bm = bmesh.from_edit_mesh(obj.data)
         bm.edges.ensure_lookup_table()
 
-        crease_layer = bm.edges.layers.crease.active
-        bevel_layer = bm.edges.layers.bevel_weight.active
+        crease_layer = _edge_float_layer(
+            bm,
+            "crease",
+            ["crease_edge", "edge_creases", "crease"],
+        )
+        bevel_layer = _edge_float_layer(
+            bm,
+            "bevel_weight",
+            ["bevel_weight_edge", "edge_bevel_weight", "bevel_weight"],
+        )
 
         edge_data = []
         edges_with_crease = 0

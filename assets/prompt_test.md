@@ -25,7 +25,7 @@ Requirements:
 - Support later bevel refinement.
 7) Constraints:
 - Do NOT hardcode object names in relationship steps.
-- For parenting/relationships, use `$ref` from previous step outputs.
+- For parenting/relationships, use $ref from previous step outputs.
 - Ensure any referenced object is created in earlier steps.
 
 Output strictly as valid VBF skills plan JSON with executable Blender skills only.

@@ -30,7 +30,7 @@ from ..config_runtime import load_llm_section
 if TYPE_CHECKING:
     from ..app.client import VBFClient
 
-# Load model configuration from vbf/config/config.json -> llm section.
+# Load model configuration from vbf/config/config.toml -> llm section.
 def _load_model_config() -> Dict[str, Any]:
     return load_llm_section()
 
@@ -130,10 +130,10 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "response_content_path": "choices[0].message.content",
     },
 
-    # Default: use llm section from config.json
+    # Default: use llm section from config.toml
     "default": {
         "provider": "openai_compat",
-        # API settings from config.json -> llm
+        # API settings from config.toml -> llm
         "base_url": _MODEL_CONFIG.get("base_url", "https://api.openai.com/v1"),
         "api_key": _MODEL_CONFIG.get("api_key"),  # Direct API key from config
         "api_key_env": ["VBF_LLM_API_KEY"],  # Fallback env var
@@ -145,7 +145,16 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "response_format": {"type": "json_object"}
         if _MODEL_CONFIG.get("use_response_format_json_object", False)
         else {},
+        "use_function_calling": _MODEL_CONFIG.get("use_function_calling", True),
+        "use_streaming": _MODEL_CONFIG.get("use_streaming", "auto"),
         "temperature": _MODEL_CONFIG.get("temperature", 0.2),
+        "is_proxy_api": _MODEL_CONFIG.get("is_proxy_api", False),
+        "enable_extra_request_headers": _MODEL_CONFIG.get("enable_extra_request_headers", False),
+        "use_curl_http_compat": _MODEL_CONFIG.get("use_curl_http_compat", False),
+        "http_timeout_seconds": _MODEL_CONFIG.get("llm_api_throttling", {}).get("call_timeout_seconds", 60.0),
+        "planning_context": _MODEL_CONFIG.get("planning_context", {}),
+        "planning_capability_probe": _MODEL_CONFIG.get("planning_capability_probe", {}),
+        "request_headers": _MODEL_CONFIG.get("request_headers", {}),
         "response_content_path": "choices[0].message.content",
     },
 }

@@ -146,6 +146,12 @@ class BuiltinValidationRules:
         obj = delta.after[obj_name]
 
         # Check it's a mesh with vertices
+        if obj.vertices == 0 and obj.polygons == 0 and obj.edges == 0:
+            return ValidationResult.skipped(
+                "create_beveled_box",
+                "Geometry counts not captured at current capture level",
+                {"dimensions": obj.dimensions}
+            )
         if obj.vertices < 8:  # A box should have at least 8 vertices
             return ValidationResult.warning(
                 "create_beveled_box",
@@ -287,6 +293,14 @@ class BuiltinValidationRules:
         if not object_name:
             return ValidationResult.skipped("add_modifier_bevel", "No object name specified")
 
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        modifier_name = data.get("modifier_name")
+        if modifier_name:
+            return ValidationResult.passed(
+                "add_modifier_bevel",
+                f"Bevel modifier '{modifier_name}' added to '{object_name}'"
+            )
+
         if object_name not in delta.after:
             return ValidationResult.failed(
                 "add_modifier_bevel",
@@ -302,11 +316,13 @@ class BuiltinValidationRules:
                 f"No 'before' state for '{object_name}'"
             )
 
-        # Bevel should increase edge/vertex count
-        if after.edges <= before.edges:
+        # Adding a modifier does not necessarily change base mesh counts until
+        # the modifier is evaluated or applied. Only warn when both captures
+        # include geometry-level counts.
+        if before.edges > 0 and after.edges > 0 and after.edges <= before.edges:
             return ValidationResult.warning(
                 "add_modifier_bevel",
-                f"Bevel didn't increase edge count ({before.edges} -> {after.edges})",
+                f"Bevel modifier did not change captured edge count ({before.edges} -> {after.edges})",
                 {"before_edges": before.edges, "after_edges": after.edges}
             )
 
@@ -379,7 +395,7 @@ class BuiltinValidationRules:
     def validate_delete_object(args: Dict, delta: GeometryDelta,
                               result: Dict) -> ValidationResult:
         """Validate delete_object: object was removed."""
-        object_name = args.get("name")
+        object_name = args.get("object_name") or args.get("name")
 
         if not object_name:
             return ValidationResult.skipped("delete_object", "No object name specified")

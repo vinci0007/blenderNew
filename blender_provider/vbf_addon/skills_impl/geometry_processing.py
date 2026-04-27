@@ -204,8 +204,25 @@ def remove_doubles(
         # Calculate removed
         final_verts = len(obj.data.vertices)
         removed = initial_verts - final_verts
+        ratio = (removed / initial_verts) if initial_verts else 0.0
+        print(
+            "[VBF-Blender] remove_doubles "
+            f"object={obj.name} before={initial_verts} after={final_verts} "
+            f"removed={removed} ratio={ratio:.3f}"
+        )
+        if ratio >= 0.25 and removed >= 100:
+            print(
+                "[VBF-Blender] remove_doubles warning=large_vertex_merge "
+                f"object={obj.name} removed={removed} ratio={ratio:.3f}"
+            )
 
-        return {"object_name": obj.name, "removed": removed}
+        return {
+            "object_name": obj.name,
+            "removed": removed,
+            "vertices_before": initial_verts,
+            "vertices_after": final_verts,
+            "removed_ratio": ratio,
+        }
     except Exception as e:
         raise fmt_err("remove_doubles failed", e)
 
@@ -286,7 +303,18 @@ def shade_smooth(object_name: str, auto_smooth: bool = True) -> Dict[str, Any]:
             raise ValueError(f"Mesh object not found: {object_name}")
 
         set_active_object(obj)
-        bpy.ops.object.shade_smooth(use_auto_smooth=auto_smooth)
+        try:
+            bpy.ops.object.shade_smooth()
+        except TypeError:
+            # Some Blender builds expose operator signature changes through
+            # TypeError; data-level smoothing below is the stable fallback.
+            pass
+
+        for poly in obj.data.polygons:
+            poly.use_smooth = True
+
+        if hasattr(obj.data, "use_auto_smooth"):
+            obj.data.use_auto_smooth = bool(auto_smooth)
 
         return {"object_name": obj.name, "smoothed": True, "auto_smooth": auto_smooth}
     except Exception as e:

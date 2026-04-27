@@ -1,7 +1,9 @@
 import pytest
+import os
 from unittest.mock import AsyncMock
 
 from vbf.app.client import VBFClient
+from vbf.core.task_state import TaskInterruptedError
 
 
 class _FakeAdapter:
@@ -220,3 +222,31 @@ async def test_call_plan_with_format_retry_rescues_after_two_empty_step_payloads
     assert call_mock.await_count == 3
     assert "steps" in plan
     assert len(plan["steps"]) >= 3
+
+
+@pytest.mark.asyncio
+async def test_plan_skill_task_wraps_runtime_error_as_interrupt(monkeypatch):
+    client = VBFClient()
+    monkeypatch.setattr(client, "_ensure_adapter", AsyncMock(return_value=_FakeAdapter()))
+    monkeypatch.setattr(
+        client,
+        "_call_plan_with_format_retry",
+        AsyncMock(side_effect=RuntimeError("provider returned malformed completion")),
+    )
+
+    save_path = os.path.join("vbf", "cache", "task_state_interrupt_test.json")
+    try:
+        with pytest.raises(TaskInterruptedError) as exc:
+            await client._plan_skill_task(
+                prompt="create a smartphone",
+                allowed_skills=["create_primitive"],
+                save_path=save_path,
+            )
+
+        assert "Plan generation failed:" in str(exc.value)
+        assert exc.value.state_path == save_path
+        assert exc.value.state.prompt == "create a smartphone"
+        assert exc.value.state.allowed_skills == ["create_primitive"]
+    finally:
+        if os.path.exists(save_path):
+            os.remove(save_path)

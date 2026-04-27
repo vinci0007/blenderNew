@@ -96,6 +96,33 @@ class ClosedLoopControl:
         # Track failed steps for analysis
         self._failed_steps: List[Tuple[str, ValidationResult]] = []
 
+    @staticmethod
+    def _is_object_creation_skill(skill: str) -> bool:
+        return skill in {
+            "create_primitive",
+            "create_beveled_box",
+            "create_curve_bezier",
+            "create_curve_circle",
+            "create_text",
+            "clone_from_image",
+        }
+
+    @staticmethod
+    def _extract_result_object_name(result: Dict[str, Any]) -> Optional[str]:
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            return None
+        for key in ("object_name", "name", "child"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+        nested = data.get("result")
+        if isinstance(nested, dict):
+            value = nested.get("object_name") or nested.get("name")
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     async def execute_with_feedback(
         self,
         step: Dict[str, Any],
@@ -171,10 +198,11 @@ class ClosedLoopControl:
 
         # Determine target objects for this step
         target_objects = self._extract_target_objects(skill, resolved_args, step_results)
+        pre_capture_targets = [] if self._is_object_creation_skill(skill) else target_objects
 
         # Capture before state
         scene_before = await scene_capture.capture_objects(
-            target_objects,
+            pre_capture_targets,
             level=self.capture_level,
             use_cache=True
         )
@@ -245,11 +273,18 @@ class ClosedLoopControl:
         if post_state_dict:
             scene_capture.update_cache_from_result(post_state_dict)
 
-        # Calculate delta
-        scene_after = {}
-        for name in target_objects:
-            if name in scene_capture._cache:
-                scene_after[name] = scene_capture._cache[name]
+        post_capture_targets = list(target_objects)
+        created_name = self._extract_result_object_name(result)
+        if created_name and created_name not in post_capture_targets:
+            post_capture_targets.append(created_name)
+
+        # Calculate delta from a fresh after-capture so new/modified objects do not
+        # rely on stale cache entries.
+        scene_after = await scene_capture.capture_objects(
+            post_capture_targets,
+            level=self.capture_level,
+            use_cache=False,
+        )
 
         delta = GeometryDelta.diff(scene_before, scene_after)
 
@@ -359,6 +394,8 @@ class ClosedLoopControl:
 
             analyzer = GeometryFeedbackAnalyzer(self.client)
             scene_state = await self.client.capture_scene_state()
+            if hasattr(self.client, "_filter_scene_for_task_context"):
+                scene_state = self.client._filter_scene_for_task_context(scene_state)
 
             analysis = await analyzer.analyze_geometry_quality(
                 stage=stage,

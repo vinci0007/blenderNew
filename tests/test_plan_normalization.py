@@ -141,11 +141,29 @@ class TestApplyParameterAliases:
         apply_parameter_aliases("create_primitive", args)
         assert args == {"primitive_type": "cube", "location": [0, 0, 0]}
 
+    def test_create_primitive_normalize_enum_aliases(self):
+        """Should normalize common primitive enum variants."""
+        args = {"type": " UV-Sphere "}
+        apply_parameter_aliases("create_primitive", args)
+        assert args == {"primitive_type": "sphere"}
+
+    def test_create_beveled_box_dimensions_alias(self):
+        """Should rename dimensions to size for create_beveled_box."""
+        args = {"dimensions": [1.0, 2.0, 3.0], "position": [0, 0, 0]}
+        apply_parameter_aliases("create_beveled_box", args)
+        assert args == {"size": [1.0, 2.0, 3.0], "location": [0, 0, 0]}
+
+    def test_create_beveled_box_compose_size_from_width_height_depth(self):
+        """Should compose size from width/height/depth when needed."""
+        args = {"width": 1.0, "height": 2.0, "depth": 3.0}
+        apply_parameter_aliases("create_beveled_box", args)
+        assert args == {"size": [1.0, 2.0, 3.0]}
+
     def test_boolean_tool_aliases_and_lowercase_operation(self):
         """Should normalize boolean_tool arg names and operation case."""
         args = {
-            "target_object": "Body",
-            "boolean_object": "Cutter",
+            "object_name": "Body",
+            "cutter_name": "Cutter",
             "operation": "DIFFERENCE",
         }
         apply_parameter_aliases("boolean_tool", args)
@@ -153,6 +171,18 @@ class TestApplyParameterAliases:
             "target_name": "Body",
             "tool_name": "Cutter",
             "operation": "difference",
+        }
+
+    def test_boolean_tool_legacy_aliases_still_work(self):
+        """Should preserve older boolean_tool aliases."""
+        args = {
+            "target_object": "Body",
+            "boolean_object": "Cutter",
+        }
+        apply_parameter_aliases("boolean_tool", args)
+        assert args == {
+            "target_name": "Body",
+            "tool_name": "Cutter",
         }
 
 

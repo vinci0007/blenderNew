@@ -1,8 +1,9 @@
 """Property tests for low-level gateway config and repair prompt wiring."""
 
+import contextlib
 import json
 import os
-import tempfile
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,47 @@ from hypothesis import given, strategies as st
 
 from vbf.llm.integration import build_skill_repair_messages
 from vbf.llm.openai_compat import _parse_bool_field, load_openai_compat_config
+
+_WORKSPACE_TMP = Path(".tmp_runtime_cfg")
+
+
+def _toml_literal(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    raise TypeError(f"Unsupported TOML literal: {type(value).__name__}")
+
+
+def _write_toml(path: Path, data):
+    lines = []
+
+    def _emit_table(prefix: str, mapping):
+        if prefix:
+            if lines:
+                lines.append("")
+            lines.append(f"[{prefix}]")
+        for key, value in mapping.items():
+            if isinstance(value, dict):
+                child_prefix = f"{prefix}.{key}" if prefix else key
+                _emit_table(child_prefix, value)
+            else:
+                lines.append(f"{key} = {_toml_literal(value)}")
+
+    _emit_table("", data)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@contextlib.contextmanager
+def _workspace_temp_config_path():
+    _WORKSPACE_TMP.mkdir(parents=True, exist_ok=True)
+    cfg_path = _WORKSPACE_TMP / f"{uuid.uuid4().hex}.toml"
+    try:
+        yield cfg_path
+    finally:
+        cfg_path.unlink(missing_ok=True)
 
 
 @given(default=st.booleans())
@@ -45,27 +87,35 @@ def test_parse_bool_field_unexpected_type_falls_back_to_default(default, value):
 
 
 @given(
-    base_url=st.text(min_size=1, max_size=40),
-    api_key=st.text(min_size=1, max_size=40),
-    model=st.text(min_size=1, max_size=40),
+    base_url=st.text(
+        alphabet=st.characters(blacklist_categories=("Cc", "Cs"), blacklist_characters=["\n", "\r", "\t"]),
+        min_size=1,
+        max_size=40,
+    ),
+    api_key=st.text(
+        alphabet=st.characters(blacklist_categories=("Cc", "Cs"), blacklist_characters=["\n", "\r", "\t"]),
+        min_size=1,
+        max_size=40,
+    ),
+    model=st.text(
+        alphabet=st.characters(blacklist_categories=("Cc", "Cs"), blacklist_characters=["\n", "\r", "\t"]),
+        min_size=1,
+        max_size=40,
+    ),
 )
 def test_json_config_defaults_low_level_flags(base_url, api_key, model):
-    with tempfile.TemporaryDirectory() as td:
-        cfg_path = Path(td) / "config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "project": {"paths": {}},
-                    "llm": {
-                        "base_url": base_url,
-                        "api_key": api_key,
-                        "model": model,
-                        "temperature": 0.2,
-                    },
+    with _workspace_temp_config_path() as cfg_path:
+        _write_toml(
+            cfg_path,
+            {
+                "project": {"paths": {}},
+                "llm": {
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": model,
+                    "temperature": 0.2,
                 },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+            },
         )
         cfg = load_openai_compat_config(str(cfg_path))
     assert cfg is not None

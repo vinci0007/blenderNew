@@ -6,6 +6,28 @@ import bpy
 from .utils import fmt_err, vec3, set_active_object
 
 
+def _set_render_engine_safe(scene: bpy.types.Scene, engine: str) -> str:
+    requested = str(engine or "eevee").strip()
+    engine_map = {
+        "cycles": "CYCLES",
+        "eevee": "BLENDER_EEVEE",
+        "eevee_next": "BLENDER_EEVEE",
+        "workbench": "BLENDER_WORKBENCH",
+    }
+    primary = engine_map.get(requested.lower(), requested.upper())
+    if primary == "BLENDER_EEVEE_NEXT":
+        primary = "BLENDER_EEVEE"
+
+    last_error = None
+    for candidate in [primary]:
+        try:
+            scene.render.engine = candidate
+            return scene.render.engine
+        except Exception as e:
+            last_error = e
+    raise RuntimeError(f"Unsupported render engine {engine!r}: {last_error}")
+
+
 def create_light(
     light_type: str,
     name: str,
@@ -167,16 +189,7 @@ def set_render_engine(engine: str = "cycles") -> Dict[str, Any]:
         scene = bpy.context.scene
         prev = scene.render.engine
 
-        engine_map = {
-            "cycles": "CYCLES",
-            "eevee": "BLENDER_EEVEE_NEXT",
-            "workbench": "BLENDER_WORKBENCH",
-        }.get(engine.lower())
-
-        if not engine_map:
-            raise ValueError(f"Unknown engine: {engine}")
-
-        scene.render.engine = engine_map
+        engine_map = _set_render_engine_safe(scene, engine)
 
         return {"engine": engine_map, "previous_engine": prev}
     except Exception as e:

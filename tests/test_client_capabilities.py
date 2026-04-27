@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock
+from pathlib import Path
 
 from vbf.app.client import VBFClient
 from vbf.transport.jsonrpc_ws import JsonRpcError
@@ -75,6 +76,17 @@ async def test_ensure_connected_probes_capabilities(monkeypatch):
     await client.ensure_connected(timeout_s=0.5)
 
     probe_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_blender_headless_raises_clear_error_for_missing_executable(tmp_path):
+    client = VBFClient(
+        blender_path=str(tmp_path / "missing-blender.exe"),
+        start_script_path=str(Path(__file__).resolve()),
+    )
+
+    with pytest.raises(FileNotFoundError, match="Set BLENDER_PATH or pass --blender-path"):
+        await client._start_blender_headless()
 
 
 @pytest.mark.asyncio

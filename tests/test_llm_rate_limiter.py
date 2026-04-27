@@ -3,6 +3,8 @@
 import pytest
 import asyncio
 import json
+import uuid
+from pathlib import Path
 from unittest.mock import Mock, AsyncMock
 
 from vbf.llm.rate_limiter import (
@@ -12,6 +14,42 @@ from vbf.llm.rate_limiter import (
     load_throttle_config,
     call_llm_with_throttle,
 )
+
+_WORKSPACE_TMP = Path(".tmp_runtime_cfg")
+
+
+def _toml_literal(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    raise TypeError(f"Unsupported TOML literal: {type(value).__name__}")
+
+
+def _write_toml(path, data):
+    lines = []
+
+    def _emit_table(prefix, mapping):
+        if prefix:
+            if lines:
+                lines.append("")
+            lines.append(f"[{prefix}]")
+        for key, value in mapping.items():
+            if isinstance(value, dict):
+                child_prefix = f"{prefix}.{key}" if prefix else key
+                _emit_table(child_prefix, value)
+            else:
+                lines.append(f"{key} = {_toml_literal(value)}")
+
+    _emit_table("", data)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _workspace_config_path() -> Path:
+    _WORKSPACE_TMP.mkdir(parents=True, exist_ok=True)
+    return _WORKSPACE_TMP / f"{uuid.uuid4().hex}.toml"
 
 
 class TestThrottleConfig:
@@ -63,10 +101,11 @@ class TestRateLimiter:
         assert stats["throttled_calls"] == 0
 
 
-def test_load_throttle_config_from_nested_llm_section(tmp_path, monkeypatch):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(
-        json.dumps(
+def test_load_throttle_config_from_nested_llm_section(monkeypatch):
+    cfg = _workspace_config_path()
+    try:
+        _write_toml(
+            cfg,
             {
                 "project": {"paths": {}},
                 "llm": {
@@ -78,16 +117,15 @@ def test_load_throttle_config_from_nested_llm_section(tmp_path, monkeypatch):
                             "max_attempts": 4,
                             "delay_between_attempts_seconds": 1.5,
                         },
-                    }
-                },
+                    },
+                }
             },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("VBF_CONFIG_PATH", str(cfg))
-    config = load_throttle_config()
-    assert config is not None
-    assert config.max_concurrent_calls == 7
-    assert config.max_calls_per_minute == 11
-    assert config.call_timeout_seconds == 123
+        )
+        monkeypatch.setenv("VBF_CONFIG_PATH", str(cfg))
+        config = load_throttle_config()
+        assert config is not None
+        assert config.max_concurrent_calls == 7
+        assert config.max_calls_per_minute == 11
+        assert config.call_timeout_seconds == 123
+    finally:
+        cfg.unlink(missing_ok=True)

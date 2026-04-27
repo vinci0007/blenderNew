@@ -175,11 +175,24 @@ class IncrementalSceneCapture:
                     results[name] = obj_data
                     self._cache[name] = obj_data
             except Exception as e:
+                if self._is_missing_object_error(e):
+                    self._cache.pop(name, None)
+                    continue
                 # Log but continue - partial capture is better than none
                 print(f"[Capture] Failed to capture {name}: {e}")
 
         self._capture_stats["total_captures"] += len(names_to_fetch)
         return results
+
+    @staticmethod
+    def _is_missing_object_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            "bpy_prop_collection[key]" in text
+            and "not found" in text
+        ) or (
+            "object not found" in text
+        )
 
     async def _capture_single_object(self, name: str,
                                    level: CaptureLevel) -> Optional[ObjectGeometry]:

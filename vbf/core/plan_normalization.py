@@ -18,11 +18,17 @@ PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
         "primitive": "primitive_type",  # Some models output 'primitive'
         "rotation": "rotation_euler",  # Blender primitive helper expects rotation_euler
     },
+    "create_beveled_box": {
+        "dimensions": "size",
+        "position": "location",
+    },
     "apply_modifier": {
         "modifier": "modifier_name",  # LLM commonly uses 'modifier'
     },
     "boolean_tool": {
+        "object_name": "target_name",
         "target_object": "target_name",
+        "cutter_name": "tool_name",
         "boolean_object": "tool_name",
     },
 }
@@ -240,6 +246,22 @@ def apply_parameter_aliases(skill_name: str, args: Dict[str, Any]) -> None:
                     args[canonical] = alias_value
 
     # Normalize enum-like values for known skills.
+    if skill_name == "create_primitive":
+        primitive_type = args.get("primitive_type")
+        if isinstance(primitive_type, str):
+            normalized = primitive_type.strip().lower().replace("-", "_").replace(" ", "_")
+            primitive_aliases = {
+                "box": "cube",
+                "cuboid": "cube",
+                "uv_sphere": "sphere",
+                "ico_sphere": "sphere",
+            }
+            args["primitive_type"] = primitive_aliases.get(normalized, normalized)
+
+    if skill_name == "create_beveled_box" and "size" not in args:
+        if all(name in args for name in ("width", "height", "depth")):
+            args["size"] = [args.pop("width"), args.pop("height"), args.pop("depth")]
+
     if skill_name == "boolean_tool":
         operation = args.get("operation")
         if isinstance(operation, str):

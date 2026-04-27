@@ -1,248 +1,238 @@
 # Vibe-Blender-Flow (VBF)
 
-**Natural-Language Driven Atomic Modeling System for Blender**
+Natural-language driven Blender modeling with staged planning, schema-aware skill execution, and feedback-guided recovery.
 
-**[中文版](README_CN.md)** | **English**
+**[中文](README_CN.md)** | **English**
+
+**[Changelog](CHANGELOG.md)** | **[更新日志](CHANGELOG_CN.md)**
 
 [![License](https://img.shields.io/badge/License-TBD-lightgray.svg)](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/Tests-162%20passed-brightgreen.svg)]()
+[![Python](https://img.shields.io/badge/Python-3.13%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/Tests-maintained-brightgreen.svg)]()
 [![Stars](https://img.shields.io/github/stars/vinci-0007/vibe-blender-flow)](https://github.com/vinci-0007/vibe-blender-flow/stars)
 
-## Example: Make a Cellphone
+## Example
 
 ![LLM creates a cellphone model](assets/llm_cellphone.gif)
 
----
-
 ## Overview
 
-VBF enables natural-language driven 3D modeling in Blender through three core principles:
+VBF turns a text prompt into executable Blender operations through three layers:
 
-1. **High-Level Skills**: Blender addon provides 362 atomic skills (no direct bmesh manipulation)
-2. **JSON-RPC Protocol**: Python client calls skills via WebSocket with automatic error recovery
-3. **LLM Integration**: Schema-aware planning with progressive disclosure prevents parameter hallucination
+1. A Blender addon exposes hundreds of atomic modeling skills through a controlled API.
+2. A Python client talks to Blender over WebSocket JSON-RPC and manages retries, recovery, state, and logging.
+3. An OpenAI-compatible planning layer converts prompts into validated skill plans instead of free-form code.
 
-## What's New
+This keeps the workflow inspectable, resumable, and much easier to debug than direct script generation.
 
-**v2.2.0 - Current (2026-04-13):**
-- **Unified Adapter Architecture**: Single `OpenAICompatAdapter` handles all OpenAI-compatible APIs via config
-- **10 Supported Models**: OpenAI, GLM-4, Kimi, Qwen, MiniMax, Ollama, and more
-- **SkillRegistry Singleton**: Global skill caching, shared across all adapter instances
-- **362 Skills** across 48 modules, 17 categories
-- **162 Tests** all passing
+## Recent Updates
 
-**v2.1.0 (2026-04-12):**
-- **18-Phase Professional Modeling Workflow**: Reference → Blockout → Structure → Detail → Polish → Finalize
-- **User Feedback Loop**: 4 key checkpoints for human confirmation (continue/adjust/redo/pause)
-- **Style Templates**: Built-in presets (Realistic Hard-Surface, Low-Poly, Organic Character, Industrial Prop)
-- **Performance Modules**: Memory manager, LLM rate limiter, response cache, WebSocket connection pool
-- **Progress Visualization**: Console/Rich/JSON/Quiet modes with real-time progress bars
+- Added task-scoped logging with short task IDs such as `task_0426-151232_43b4d1a8`.
+- Added per-task transcript logs that mirror all console stdout/stderr without truncating terminal output.
+- Added a daily plain-text run event log plus a separate per-task result JSON snapshot.
+- Added scene isolation controls so old objects do not leak into planning, feedback, and replan context by default.
+- Added analyzer parse fallback so non-strict LLM JSON no longer silently becomes a false `"good"` result.
+- Added a geometry-first guard for simple prompts like "make a sofa 3D model" unless later stages are explicitly requested.
+- Added local autofix for `create_material_simple` plans missing `base_color`.
+- Improved Blender diagnostics around modifier application order and `remove_doubles` vertex merge reporting.
 
-**v2.0 (2026-04-11):**
-- **Four-Layer Control System**: Checkpoint/Resume, Enhanced Recovery, Active Replanning, Real-time Feedback
-- **Complete RadioTask Removal**: Pure LLM-driven workflow, no hardcoded demo tasks
-- **Scene State Capture**: Current scene context fed back to LLM for smart replanning
+## Current Architecture
 
----
+The codebase is organized by domain instead of a flat root layout:
 
-## Repository Structure
+- `vbf/app/`: CLI entrypoint and main orchestration client
+- `vbf/adapters/`: model adapters and provider-facing request shaping
+- `vbf/llm/`: OpenAI-compatible config loading, rate limiting, caching, and planning helpers
+- `vbf/feedback/`: capture, validation, stage analysis, and recovery control
+- `vbf/core/`: task state, scene state, plan normalization, and protocol helpers
+- `vbf/runtime/`: styles, logging, memory management, and progress helpers
+- `vbf/transport/`: JSON-RPC WebSocket transport and connection pooling
+- `blender_provider/vbf_addon/`: Blender addon and skill implementations
 
-```
-/vbf                      Main Python package
-├─ adapters/              Unified LLM adapter system
-│   ├─ __init__.py        Factory: get_adapter(), 10 supported models
-│   ├─ base_adapter.py    VBFModelAdapter base class
-│   ├─ openai_compat_adapter.py  Unified OpenAI-compatible adapter
-│   └─ skill_registry.py  SkillRegistry singleton (global cache)
-├─ client.py              VBFClient (4-layer control system)
-├─ config/config.json LLM configuration
-├─ llm_rate_limiter.py    Rate limiting with 429 exponential backoff
-└─ ...
-
-/blender_provider/vbf_addon/   Blender addon
-├─ server.py              WebSocket JSON-RPC server (port 8006)
-├─ skills_impl/           362 skill implementations
-│   ├─ registry.py        SKILL_REGISTRY dict
-│   └─ [48 domain modules...]
-└─ skills_docs/           Full skill documentation
-
-/tests/                   Test suite (162 tests)
-```
-
----
+For a more detailed breakdown, see [vbf/MODULE_LAYOUT.md](vbf/MODULE_LAYOUT.md).
 
 ## Requirements
 
-- **Client**: Python >= 3.10, `uv sync` or `pip install openai websockets`
-- **Blender**: 4.0+ / 5.x
-
----
+- Python `>= 3.13`
+- Blender `4.0+` or `5.x`
+- `uv` recommended for local development and test execution
 
 ## Quick Start
 
-### Blender Addon
-1. Copy `blender_provider/vbf_addon/` to Blender addons directory
-2. Enable "Vibe-Blender-Flow (VBF)" in Edit → Preferences → Add-ons
-3. Start server: N-panel → VBF tab → Start
+### 1. Install Python dependencies
 
-### Client
 ```bash
-# Run task
+uv sync
+```
+
+### 2. Configure the LLM
+
+Create `vbf/config/config.toml` from the example:
+
+```toml
+[project.paths]
+cache_dir = "vbf/cache"
+logs_dir = "vbf/logs"
+task_state_file = "vbf/cache/task_state.json"
+last_gen_fail_file = "vbf/cache/last_gen_fail.txt"
+last_plan_fail_file = "vbf/cache/last_plan_fail.txt"
+last_plan_raw_file = "vbf/cache/last_plan_raw.txt"
+llm_cache_dir = "vbf/cache/llm_cache"
+
+[project.scene]
+task_scene_policy = "isolate"
+include_environment_objects = true
+
+[llm]
+use_llm = true
+base_url = "https://api.openai.com/v1"
+api_key = "YOUR_API_KEY"
+model = "gpt-4o-mini"
+temperature = 0.2
+planning_mode = "adaptive_staged"
+
+[llm.planning_context]
+compression_mode = "capability_coverage"
+target_prompt_budget_chars = 18000
+
+[llm.requirement_assessment]
+mode = "auto"
+enable_local_fallback = false
+prefer_geometry_for_simple_model_requests = true
+
+[llm.planning_capability_probe]
+enabled = true
+timeout_seconds = 20
+cache_ttl_seconds = 3600
+
+[llm.llm_api_throttling]
+max_concurrent_calls = 3
+max_calls_per_minute = 20
+call_timeout_seconds = 600
+```
+
+The full commented template lives at [vbf/config/config.toml.example](vbf/config/config.toml.example).
+
+### 3. Install and start the Blender addon
+
+1. Copy `blender_provider/vbf_addon/` into Blender's addon directory, or install it as a zip/package in Blender.
+2. Enable `Vibe-Blender-Flow (VBF)` in Blender Preferences.
+3. Start the VBF server from the addon panel.
+
+By default, the local launcher prefers the repo-local addon copy. Set `VBF_PREFER_INSTALLED_ADDON=1` if you explicitly want the previously installed addon instead.
+If you want VBF to auto-launch Blender headlessly, make sure Blender is on `PATH`, or pass `--blender-path`, or set `BLENDER_PATH` to the executable location.
+
+### 4. Run a task
+
+```bash
 uv run python -m vbf --prompt "create a retro radio"
-
-# With style
+uv run python -m vbf --prompt-file assets/prompt_test.md
 uv run python -m vbf --prompt "create a smartphone" --style hard_surface_realistic
+```
 
-# Resume
+### 5. Resume a saved task
+
+```bash
 uv run python -m vbf --prompt "continue" --resume vbf/cache/task_state.json
 ```
 
-### Python API
-```python
-import asyncio
-from vbf import VBFClient
+## Planning Pipeline
 
-async def main():
-    client = VBFClient()
-    await client.ensure_connected()
+The current default planning flow is:
 
-    # Run task with automatic error recovery
-    result = await client.run_task("create a detailed spaceship")
+1. Assess the user's real deliverable scope.
+2. Select stages such as geometry, UV/material, lighting, animation, or render.
+3. Compress the skill set per stage using required capabilities rather than a naive top-k list.
+4. Ask the LLM for a structured plan.
+5. Normalize and validate arguments against skill schemas.
+6. Execute with feedback capture, local replan, resumable task state, and task-scoped logging.
 
-    # Resume from checkpoint
-    result = await client.run_task(
-        "create a detailed spaceship",
-        resume_state_path="vbf/cache/task_state.json"
-    )
+This helps avoid common failure modes such as:
 
-asyncio.run(main())
-```
+- asking for render skills during a geometry-only task
+- dropping required modeling capabilities during context compression
+- using unsupported tool/JSON modes on proxy gateways
+- emitting malformed or underspecified skill arguments
+- letting unrelated scene leftovers contaminate a new modeling request
 
----
+## OpenAI-Compatible Provider Support
 
-## 10 Supported LLM Models
+VBF uses a single OpenAI-compatible integration path for multiple providers and gateways. Typical examples include:
 
-| Model | Provider | Config Example |
-|-------|----------|----------------|
-| GLM-4 | 智谱 BigModel | `https://open.bigmodel.cn/api/paas/v4` |
-| Kimi | Moonshot | `https://api.moonshot.cn/v1` |
-| Qwen | 阿里 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| MiniMax | MiniMax | `https://api.minimax.chat/v1` |
-| GPT-4 / GPT-4o | OpenAI | `https://api.openai.com/v1` |
-| Ollama | Local | `http://localhost:11434/v1` |
+- OpenAI
+- GLM / BigModel
+- Moonshot / Kimi
+- DashScope / Qwen
+- MiniMax
+- Ollama
+- custom OpenAI-compatible gateways
 
----
+Provider behavior can be tuned through `base_url`, `chat_completions_path`, proxy flags, extra request headers, and capability probes in `config.toml`.
 
-## LLM Configuration
+## Runtime Files
 
-Create `vbf/config/config.json`:
+Runtime-generated artifacts are kept out of source directories and are split by purpose:
 
-```json
-{
-  "project": {
-    "paths": {
-      "cache_dir": "vbf/cache",
-      "logs_dir": "vbf/logs",
-      "task_state_file": "vbf/cache/task_state.json",
-      "last_gen_fail_file": "vbf/cache/last_gen_fail.txt",
-      "last_plan_fail_file": "vbf/cache/last_plan_fail.txt",
-      "last_plan_raw_file": "vbf/cache/last_plan_raw.txt",
-      "llm_cache_dir": "vbf/cache/llm_cache"
-    }
-  },
-  "llm": {
-    "use_llm": true,
-    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "api_key": "YOUR_KEY",
-    "model": "glm-4.7-flash",
-    "temperature": 0.2,
-    "llm_api_throttling": {
-      "max_concurrent_calls": 1,
-      "max_calls_per_minute": 20,
-      "call_timeout_seconds": 120,
-      "retry_on_failure": { "max_attempts": 3 }
-    }
-  }
-}
-```
+- `vbf/cache/`: task state, plan snapshots, last raw failure payloads, and LLM disk cache
+- `vbf/logs/run_events_YYYYMMDD.log`: daily plain-text event log for monitoring and tailing
+- `vbf/logs/task_MMDD-HHMMSS_<id>.log`: per-task transcript log that mirrors all console output
+- `vbf/logs/task_result_task_MMDD-HHMMSS_<id>.json`: final structured result snapshot for that task
 
----
+Notes:
 
-## 362 Skills (17 Categories)
-
-| Category | Examples |
-|----------|----------|
-| **Gateway** | py_get, py_set, py_call, ops_invoke |
-| **Primitives** | create_primitive, create_beveled_box |
-| **Geometry** | extrude_faces, inset_faces, subdivide_mesh |
-| **Edge Control** | mark_edge_crease, set_edge_bevel_weight |
-| **UV** | unwrap_mesh, pack_uv_islands |
-| **Modifiers** | add_modifier_array, add_modifier_solidify |
-| **Materials** | create_material_simple, create_shader_node_tree |
-| **Animation** | insert_keyframe, set_frame_range, bake_animation |
-| **Geometry Nodes** | create_geometry_node_tree |
-| **Armature** | create_armature, add_bone, skin_to_armature |
-| **Lighting/Physics** | light_add, rigidbody_add |
-
-Full docs: [SKILL.md](blender_provider/vbf_addon/skills_docs/SKILL.md)
-
----
+- A task ID is created once for the user's initial modeling request and is reused through feedback, replan, and recovery within that same task.
+- Console output stays unchanged in the terminal and is also mirrored into the task transcript log.
+- The daily event log is plain text by design for easier grep/tail/monitor workflows, while the final task result stays as JSON.
 
 ## Development
 
-```bash
-# Run tests (MUST specify tests/ directory)
-uv run pytest tests/
+### Run the main test suite
 
-# Verbose mode
-uv run pytest tests/ -v
+```bash
+uv run pytest tests/ -q
 ```
 
-### Test Layout Policy
+### Run targeted tests
 
-- `tests/` root keeps only stable tests for functionality/performance and PR regression coverage.
-- Temporary task-specific test scripts must be placed under `tests/task_tmp/`.
-- Default pytest discovery excludes `tests/task_tmp/`.
+```bash
+uv run pytest tests/test_config_runtime.py tests/test_client_two_stage_planning.py -q
+```
 
----
+### Temporary test policy
+
+- Keep stable regression tests in `tests/`.
+- Put one-off diagnostics and temporary task-specific scripts under `tests/task_tmp/`.
+- Default pytest discovery ignores `tests/task_tmp/`.
+- Run a temporary test explicitly when needed, for example:
+
+```bash
+python -m pytest tests/task_tmp/test_example.py -q
+```
 
 ## Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| WS connection failed | Verify Blender addon running (N-panel → VBF → Status "Running") |
-| LLM not configured | Edit `vbf/config/config.json` with API credentials |
-| 429 Rate limit | Auto-retries with exponential backoff |
-| Resume task | `vbf --prompt "..." --resume vbf/cache/task_state.json` |
+| Issue | What to check |
+|---|---|
+| Blender connection fails | Confirm the addon is running and the WebSocket endpoint is available |
+| Health check says running but tasks still hang | Restart the addon and verify the WebSocket + JSON-RPC probe succeeds |
+| LLM config not loading | Use `vbf/config/config.toml`, not legacy JSON config files |
+| A new task keeps mentioning old unrelated objects | Keep `[project.scene].task_scene_policy = "isolate"` so only task-relevant objects are sent into planning/feedback context |
+| Simple prompts jump into materials/render too early | Leave `llm.requirement_assessment.prefer_geometry_for_simple_model_requests = true` |
+| Analyzer reports `LLM parse error` | Check `vbf/cache/last_gen_fail.txt`; recent versions try to recover partial quality fields before falling back to manual inspection |
+| `plan_gate_missing_required ... create_material_simple missing arg=base_color` appears during replan | Recent versions auto-fill a neutral default `base_color`; upgrade if you still see hard failures |
+| Blender prints "applied modifier is not first" warnings | VBF now moves the target modifier to the top before applying and logs the reorder for traceability |
+| `remove_doubles` deletes an unexpectedly large number of vertices | Inspect the task log for before/after vertex counts and large-merge warnings before continuing |
+| Need to resume a failed run | Use `--resume vbf/cache/task_state.json` |
 
----
+## Additional References
 
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md)
-
----
-
-## Contributors
-
-See [CONTRIBUTING.md](CONTRIBUTING.md)
-
----
+- [CHANGELOG.md](CHANGELOG.md)
+- [CHANGELOG_CN.md](CHANGELOG_CN.md)
+- [vbf/MODULE_LAYOUT.md](vbf/MODULE_LAYOUT.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [blender_provider/vbf_addon/skills_docs/SKILL.md](blender_provider/vbf_addon/skills_docs/SKILL.md)
 
 ## License
 
-TBD - See [LICENSE](LICENSE) file.
-
----
-
-## Code Frequency
-
-[![Contribution Activity](https://github-readme-activity-graph.vercel.app/graph?username=vinci0007&repo=vibe-blender-flow&theme=github-dark&bg_color=1a1b26&color=7aa2f7&line=7aa2f7&point=7aa2f7&area=true&hide_border=false)](https://github.com/vinci0007/vibe-blender-flow/graphs/code-frequency)
-
-*Commit activity and code changes: [View full graphs](https://github.com/vinci0007/vibe-blender-flow/graphs/code-frequency)*
-
----
-
-**Made with ❤️ for the Blender community**
+TBD. See [LICENSE](LICENSE).

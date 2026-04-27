@@ -15,6 +15,7 @@ from vbf.feedback.rules import (
     ValidationRuleRegistry, BuiltinValidationRules,
     register_custom_rule,
 )
+from vbf.feedback.llm import GeometryFeedbackAnalyzer
 
 
 class TestGeometryDelta:
@@ -132,6 +133,47 @@ class TestValidationRules:
         validation = BuiltinValidationRules.validate_boolean_operation(args, delta, result)
         assert validation.status == "failed"
 
+    def test_validate_add_modifier_bevel_passes_when_modifier_added(self):
+        """Adding a bevel modifier need not change raw mesh edge counts immediately."""
+        delta = GeometryDelta(
+            before={
+                "Ring": ObjectGeometry(
+                    name="Ring", obj_type="MESH",
+                    location=[0, 0, 0], dimensions=[1, 1, 1],
+                    edges=96,
+                )
+            },
+            after={
+                "Ring": ObjectGeometry(
+                    name="Ring", obj_type="MESH",
+                    location=[0, 0, 0], dimensions=[1, 1, 1],
+                    edges=0,
+                )
+            },
+        )
+        validation = BuiltinValidationRules.validate_add_modifier_bevel(
+            {"object_name": "Ring"},
+            delta,
+            {"ok": True, "data": {"modifier_name": "VBF_Bevel"}},
+        )
+        assert validation.status == "passed"
+
+    def test_validate_delete_object_accepts_object_name_arg(self):
+        """delete_object skill uses object_name, not name."""
+        before = {
+            "CUT_Lens": ObjectGeometry(
+                name="CUT_Lens", obj_type="MESH",
+                location=[0, 0, 0], dimensions=[1, 1, 1],
+            )
+        }
+        delta = GeometryDelta.diff(before, {})
+        validation = BuiltinValidationRules.validate_delete_object(
+            {"object_name": "CUT_Lens"},
+            delta,
+            {"ok": True, "data": {"deleted": True}},
+        )
+        assert validation.status == "passed"
+
 
 class TestValidationRuleRegistry:
     """Tests for ValidationRuleRegistry."""
@@ -170,6 +212,61 @@ class TestCaptureLevel:
         assert CaptureLevel.GEOMETRY is not None
         assert CaptureLevel.TOPOLOGY is not None
         assert CaptureLevel.FULL is not None
+
+
+class TestTaskSceneIsolation:
+    def test_task_scene_context_hides_preexisting_meshes(self):
+        client = VBFClient()
+        client._task_scene_policy = "isolate"
+        client._task_include_environment_objects = True
+        client._task_object_names = {"GEO_Sofa_Base"}
+
+        scene = SceneState()
+        scene.add_object("GEO_Phone_Chassis", "MESH", [0, 0, 0], [1, 1, 1])
+        scene.add_object("GEO_Sofa_Base", "MESH", [1, 0, 0], [2, 1, 1])
+        scene.add_object("Camera", "CAMERA", [0, -4, 2], [0, 0, 0])
+
+        filtered = client._filter_scene_for_task_context(scene)
+        names = {obj["name"] for obj in filtered.get_objects()}
+
+        assert names == {"GEO_Sofa_Base", "Camera"}
+        assert filtered.statistics["original_object_count"] == 3
+        assert filtered.statistics["context_object_count"] == 2
+
+
+class TestAnalyzerFallback:
+    @pytest.mark.asyncio
+    async def test_analyzer_parse_failure_recovers_quality_from_last_raw_response(self, tmp_path):
+        fail_path = tmp_path / "last_gen_fail.txt"
+        fail_path.write_text(
+            """
+{
+  "raw_content": "{\\"quality\\": \\"bad\\", \\"reason\\": \\"scene contaminated\\", \\"suggestions\\": [\\"clean old objects\\"], \\"score\\": 0.2"
+}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        class _FakeClient:
+            _runtime_paths = {"last_gen_fail_file": str(fail_path)}
+
+            async def _ensure_adapter(self):
+                return object()
+
+            async def _adapter_call(self, messages):
+                raise ValueError("LLM parse error (parse_stage=strict_json_loads)")
+
+        analyzer = GeometryFeedbackAnalyzer(_FakeClient())
+        analysis = await analyzer.analyze_geometry_quality(
+            stage="blockout",
+            scene=SceneState(),
+            step_results={},
+            task_prompt="make a sofa",
+        )
+
+        assert analysis.quality == "bad"
+        assert analysis.score == 0.2
+        assert "scene contaminated" in analysis.reason
 
 
 class TestValidationResult:
@@ -386,6 +483,29 @@ class TestIncrementalSceneCaptureEvents:
         assert "Cube" in result
         assert capture._event_stream_available is False
 
+    @pytest.mark.asyncio
+    async def test_capture_objects_silently_skips_missing_deleted_objects(self, capsys):
+        """Deleted objects are expected during cleanup and should not spam logs."""
+
+        class _FakeClient:
+            async def execute_skill(self, skill, args):
+                return {"ok": False}
+
+        capture = IncrementalSceneCapture(_FakeClient())
+        capture._event_stream_available = False
+
+        async def _missing_object(name, level):
+            raise RuntimeError(
+                "py_get failed: 'bpy_prop_collection[key]: key "
+                f"\"{name}\" not found'"
+            )
+
+        capture._capture_single_object = _missing_object
+        result = await capture.capture_objects(["CUT_Lens_UR"], use_cache=False)
+
+        assert result == {}
+        assert "Failed to capture" not in capsys.readouterr().out
+
 
 class TestClosedLoopCheckpointRollback:
     """Regression tests for checkpoint rollback + replan cleanup."""
@@ -453,7 +573,7 @@ class TestClosedLoopCheckpointRollback:
         monkeypatch.setattr(client, "capture_scene_state", AsyncMock(return_value=SceneState()))
         monkeypatch.setattr(
             client,
-            "_plan_skill_task",
+            "_plan_skill_task_auto",
             AsyncMock(return_value=({"steps": initial_steps, "execution": {"max_replans": 5}}, initial_steps)),
         )
         monkeypatch.setattr(client, "_replan_from_step", _fake_replan_from_step)

@@ -36,6 +36,8 @@ def create_beveled_box(
         if not target:
             raise RuntimeError("Beveled box target object not found after creation")
         set_active_object(target)
+        bpy.context.view_layer.update()
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
         mod = target.modifiers.new(name="VBF_Bevel", type="BEVEL")
         mod.width = float(bevel_width)

@@ -1,4 +1,5 @@
 # UV Mapping Skills - UV Unwrap and Layout Operations
+import math
 from typing import Any, Dict, List
 
 import bpy
@@ -66,9 +67,9 @@ def smart_project_uv(
         bpy.ops.mesh.select_all(action="SELECT")
 
         bpy.ops.uv.smart_project(
-            angle_limit=angle_limit,
+            angle_limit=math.radians(angle_limit),
             island_margin=island_margin,
-            area_threshold=area_threshold,
+            area_weight=area_threshold,
         )
 
         bpy.ops.object.mode_set(mode="OBJECT")
@@ -102,7 +103,7 @@ def lightmap_pack(
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
 
-        bpy.ops.uv.lightmap_pack(PACK_QUALITY=pack_quality, MARGIN=margin)
+        bpy.ops.uv.lightmap_pack(PREF_BOX_DIV=pack_quality, PREF_MARGIN_DIV=margin)
 
         bpy.ops.object.mode_set(mode="OBJECT")
 

@@ -69,7 +69,19 @@ def apply_modifier(object_name: str, modifier_name: str) -> Dict[str, Any]:
         if modifier_name not in [m.name for m in obj.modifiers]:
             raise ValueError(f"Modifier not found: {modifier_name}")
         set_active_object(obj)
+        modifier_names = [m.name for m in obj.modifiers]
+        original_index = modifier_names.index(modifier_name)
+        if original_index != 0:
+            bpy.ops.object.modifier_move_to_index(modifier=modifier_name, index=0)
+            print(
+                "[VBF-Blender] apply_modifier moved_to_top "
+                f"object={obj.name} modifier={modifier_name} from_index={original_index}"
+            )
         bpy.ops.object.modifier_apply(modifier=modifier_name)
-        return {"object_name": obj.name, "modifier_name": modifier_name}
+        return {
+            "object_name": obj.name,
+            "modifier_name": modifier_name,
+            "moved_from_index": original_index,
+        }
     except Exception as e:
         raise fmt_err("apply_modifier failed", e)

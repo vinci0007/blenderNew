@@ -3,7 +3,15 @@ import asyncio
 from pathlib import Path
 
 from .client import VBFClient
+from ..config_runtime import load_project_paths
 from ..core.task_state import TaskInterruptedError
+from ..runtime.run_logging import (
+    append_run_event,
+    create_task_log_context,
+    summarize_task_result,
+    tee_console_to_task_log,
+    write_task_result_log,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -135,32 +143,93 @@ async def _run(
     no_auto_check: bool = False,
     no_llm_feedback: bool = False,
 ) -> int:
-    client = VBFClient(host=host, port=port, blender_path=blender_path)
-    try:
-        if no_feedback:
-            # Legacy mode: no closed-loop feedback
-            result = await client.run_task(
-                prompt=prompt,
-                resume_state_path=resume,
-                save_state_path=save_state,
-                style=style,
+    runtime_paths = load_project_paths()
+    log_context = create_task_log_context(runtime_paths["logs_dir"])
+    logs_dir = str(log_context.logs_dir)
+    mode = "legacy" if no_feedback else "feedback"
+    with tee_console_to_task_log(log_context):
+        print(f"[VBF] Task ID: {log_context.task_id}")
+        print(f"[VBF] Task created: {log_context.created_at}")
+        print(f"[VBF] Task log: {log_context.transcript_path}")
+        client = VBFClient(host=host, port=port, blender_path=blender_path)
+        client._task_id = log_context.task_id
+        client._task_log_path = str(log_context.transcript_path)
+        client._task_logging_managed = True
+        try:
+            if no_feedback:
+                # Legacy mode: no closed-loop feedback
+                result = await client.run_task(
+                    prompt=prompt,
+                    resume_state_path=resume,
+                    save_state_path=save_state,
+                    style=style,
+                )
+            else:
+                # Closed-loop mode with feedback
+                result = await client.run_task_with_feedback(
+                    prompt=prompt,
+                    resume_state_path=resume,
+                    save_state_path=save_state,
+                    style=style,
+                    enable_auto_check=not no_auto_check,
+                    enable_llm_feedback=not no_llm_feedback,
+                )
+            result_path = write_task_result_log(result, logs_dir, task_id=log_context.task_id)
+            summary = summarize_task_result(result)
+            event_path = append_run_event(
+                "task_result_saved",
+                {
+                    "task_id": log_context.task_id,
+                    "mode": mode,
+                    "steps": summary["steps"],
+                    "ok": summary["ok"],
+                    "failed": summary["failed"],
+                    "unknown": summary["unknown"],
+                    "plan_steps": summary["plan_steps"],
+                    "result_file": str(result_path),
+                    "task_log_file": str(log_context.transcript_path),
+                },
+                logs_dir,
             )
-        else:
-            # Closed-loop mode with feedback
-            result = await client.run_task_with_feedback(
-                prompt=prompt,
-                resume_state_path=resume,
-                save_state_path=save_state,
-                style=style,
-                enable_auto_check=not no_auto_check,
-                enable_llm_feedback=not no_llm_feedback,
+            print(f"[VBF] Result saved: {result_path}")
+            print(f"[VBF] Event log: {event_path}")
+            print(
+                "[VBF] Summary: "
+                f"steps={summary['steps']} "
+                f"ok={summary['ok']} "
+                f"failed={summary['failed']} "
+                f"unknown={summary['unknown']} "
+                f"plan_steps={summary['plan_steps']}"
             )
-        print(result)
-        return 0
-    except TaskInterruptedError as e:
-        print(f"[VBF] Task interrupted: {e}")
-        print(f'[VBF] To resume, run: vbf {resume_prompt_arg} --resume "{e.state_path}"')
-        return 1
+            return 0
+        except TaskInterruptedError as e:
+            append_run_event(
+                "task_interrupted",
+                {
+                    "task_id": log_context.task_id,
+                    "mode": mode,
+                    "state_path": e.state_path,
+                    "reason": str(e),
+                    "task_log_file": str(log_context.transcript_path),
+                },
+                logs_dir,
+            )
+            print(f"[VBF] Task interrupted: {e}")
+            print(f'[VBF] To resume, run: vbf {resume_prompt_arg} --resume "{e.state_path}"')
+            return 1
+        except FileNotFoundError as e:
+            append_run_event(
+                "task_startup_failed",
+                {
+                    "task_id": log_context.task_id,
+                    "mode": mode,
+                    "reason": str(e),
+                    "task_log_file": str(log_context.transcript_path),
+                },
+                logs_dir,
+            )
+            print(f"[VBF] Startup failed: {e}")
+            return 1
 
 
 def main(argv: list[str] | None = None) -> int:

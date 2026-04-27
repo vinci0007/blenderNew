@@ -97,6 +97,35 @@ class SceneState:
             return [obj for obj in self._objects.values() if obj.get("_modified")]
         return list(self._objects.values())
 
+    def filtered_copy(
+        self,
+        *,
+        include_names: Optional[Set[str]] = None,
+        include_types: Optional[Set[str]] = None,
+        warning: Optional[str] = None,
+        statistics: Optional[Dict[str, Any]] = None,
+    ) -> "SceneState":
+        """Return a shallow filtered copy for task-scoped LLM context."""
+        include_names = include_names or set()
+        include_types = include_types or set()
+        filtered = SceneState()
+        filtered.scene_name = self.scene_name
+        filtered.frame_current = self.frame_current
+        filtered.frame_start = self.frame_start
+        filtered.frame_end = self.frame_end
+        filtered._captured_at = self._captured_at
+        for name, obj in self._objects.items():
+            if name in include_names or str(obj.get("type", "")) in include_types:
+                filtered._objects[name] = dict(obj)
+        filtered._warnings = list(self._warnings)
+        filtered._errors = list(self._errors)
+        filtered._statistics = dict(self._statistics)
+        if warning:
+            filtered.add_warning(warning)
+        if statistics:
+            filtered.set_statistics(**statistics)
+        return filtered
+
     @property
     def warnings(self) -> List[str]:
         """Public access to warnings."""
