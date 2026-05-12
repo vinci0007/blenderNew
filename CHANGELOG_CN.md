@@ -6,7 +6,7 @@
 
 **中文** | **[English](CHANGELOG.md)**
 
-## [2.3.3] - 2026-04-30
+## [2.4.0] - 2026-04-30
 
 ### 新增
 
@@ -15,18 +15,39 @@
 - 新增 `vbf.recover_executor` JSON-RPC，用于在队列卡住且没有正在执行的技能时自动重挂 Blender app timer。
 - 新增客户端执行前 backpressure，避免超时或 resume 后继续向异常队列堆积 `execute_skill` 请求。
 - 新增未开始执行的 queued job deadline，客户端断开或排队过期后不会再晚到修改场景。
+- 新增 `--image` / `--image-file` 多模态规划输入，可把 prompt 文本和一张或多张参考图一起发送给支持视觉输入的 LLM。
+- 新增 Blender 5.1 API 文档 zip 解析兜底；未解压 reference 文档时可读取 `reference/blender_python_reference_5_1.zip`。
 
 ### 变更
 
 - LongCat 的 Anthropic Messages 配置保持 `api_protocol = "claude_responses"`，通过 `auth_scheme = "bearer"` 单独控制 Bearer 鉴权。
 - addon self-check 对旧 server 对象更加兼容，不再假设一定存在 executor health 接口。
 - 在配置模板中补充 `[llm.runtime]` 的 `executor_backpressure_enabled` 与 `executor_ready_timeout_seconds` 说明。
+- adaptive batch quality repair 改为阶段感知：材质、灯光、动画、相机、渲染等后续阶段缺口会作为 pending work 继续推进，而不是反复修复当前几何 batch。
+- batch quality repair 使用独立预算，避免批次质量修复耗尽真正执行失败使用的 step 级 `max_replans`。
+- 项目包、Blender addon、规划协议示例与测试期望统一更新到 `2.4.0`。
+- 更新为自定义非商业许可证：允许个人非商业使用和个人二次开发，但个人衍生项目必须开源并保留署名、仓库与许可证信息。
 
 ### 修复
 
 - 修复 LongCat `/anthropic/v1/messages` 因发送 `x-api-key` 而触发 `401 missing_api_key` 的问题。
 - 修复 WebSocket 仍绑定、`timer_registered=true`，但 Blender 主线程 executor poll 停止消费队列时导致所有技能超时的问题。
 - 修复 CLI 超时后旧请求仍留在队列、后续可能晚到修改场景的风险。
+- 修复 adaptive agent-loop batch repair 把后续阶段工作当成当前阶段 critical issue 时可能耗尽 `max_replans` 的问题。
+- 修复 batch repair step id 冲突，修复批次会重新编号并在重放前清理被替换批次结果。
+- 修复不安全的 batch repair 计划删除后续步骤仍引用的父对象或控制对象的问题。
+- 修复仓库不上传 Blender 5.1 reference 文档时 API 文档兼容测试失败的问题；文档缺失时测试会自动 skip。
+
+### 文档
+
+- 更新 README 和 README_CN，补充图片输入、LongCat Bearer 鉴权、executor 健康/backpressure、可选 Blender API 文档校验和许可证限制。
+- 更新 RELEASE_NOTES，使 2.4.0 摘要与实际功能改动一致。
+
+### 测试
+
+- 已验证：
+  - `uv run pytest tests/test_client_two_stage_planning.py tests/test_run_logging.py tests/test_openai_compat_adapter_response_format.py -q`
+  - `uv run pytest tests/test_cli_prompt_tokens.py tests/test_config_runtime.py tests/test_blender_51_api_docs_compat.py -q`
 
 ## [2.3.2] - 2026-04-28
 

@@ -996,7 +996,7 @@ class VBFWebSocketServer:
         return {
             "server": "vbf_addon",
             "rpc_version": "1.0",
-            "addon_version": "0.1.0",
+            "addon_version": "2.4.0",
             "features": {
                 "capabilities_rpc": True,
                 "list_skills": True,

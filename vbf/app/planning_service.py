@@ -429,7 +429,7 @@ async def plan_skill_task_adaptive_staged(
             ledger.save(ledger_path)
 
         plan: Dict[str, Any] = {
-            "vbf_version": "2.1",
+            "vbf_version": "2.4.0",
             "plan_type": "skills_plan",
             "steps": remapped_steps,
             "metadata": {
@@ -495,7 +495,7 @@ async def plan_skill_task_adaptive_staged(
                     )
                 except Exception as e:
                     partial_plan = {
-                        "vbf_version": "2.1",
+                        "vbf_version": "2.4.0",
                         "plan_type": "skills_plan",
                         "steps": all_steps,
                         "metadata": {
@@ -566,7 +566,7 @@ async def plan_skill_task_adaptive_staged(
             raise ValueError("adaptive_batched planning produced no executable steps")
 
         merged_plan: Dict[str, Any] = {
-            "vbf_version": "2.1",
+            "vbf_version": "2.4.0",
             "plan_type": "skills_plan",
             "steps": all_steps,
             "metadata": {
@@ -624,7 +624,7 @@ async def plan_skill_task_adaptive_staged(
         raise ValueError("adaptive_staged planning produced no executable steps")
 
     merged_plan: Dict[str, Any] = {
-        "vbf_version": "2.1",
+        "vbf_version": "2.4.0",
         "plan_type": "skills_plan",
         "steps": all_steps,
         "metadata": {

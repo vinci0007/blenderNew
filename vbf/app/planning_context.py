@@ -580,7 +580,7 @@ def merge_two_stage_plans(
     merged_steps = remapped_geom + remapped_pres
 
     merged_plan: Dict[str, Any] = {
-        "vbf_version": geom_plan.get("vbf_version", pres_plan.get("vbf_version", "2.1")),
+        "vbf_version": geom_plan.get("vbf_version", pres_plan.get("vbf_version", "2.4.0")),
         "plan_type": "skills_plan",
         "steps": merged_steps,
         "execution": {

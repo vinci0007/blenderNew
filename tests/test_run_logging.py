@@ -21,7 +21,7 @@ def test_summarize_task_result_counts_steps_without_payload_dump():
             "003": {"data": {"note": "unknown"}},
         },
         "plan": {
-            "vbf_version": "2.1",
+            "vbf_version": "2.4.0",
             "plan_type": "skills_plan",
             "steps": [{"step_id": "001"}, {"step_id": "002"}],
         },

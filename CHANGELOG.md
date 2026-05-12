@@ -4,7 +4,7 @@ This project follows a Keep a Changelog style structure.
 
 The entries below focus on meaningful user-facing, architecture, and workflow changes rather than listing every commit.
 
-## [2.3.3] - 2026-04-30
+## [2.4.0] - 2026-04-30
 
 ### Added
 
@@ -14,6 +14,7 @@ The entries below focus on meaningful user-facing, architecture, and workflow ch
 - Added client-side executor backpressure before `execute_skill` so VBF waits for Blender's executor to become idle instead of piling new requests onto an unhealthy queue.
 - Added queued-job deadlines so stale, not-yet-started skill requests are skipped if the client disconnected or the queue deadline expired before execution.
 - Added multimodal planning input via `--image` / `--image-file`, forwarding prompt text and one or more reference images to vision-capable LLM providers.
+- Added optional Blender 5.1 API reference parsing from `reference/blender_python_reference_5_1.zip` when extracted docs are not present locally.
 
 ### Changed
 
@@ -22,6 +23,8 @@ The entries below focus on meaningful user-facing, architecture, and workflow ch
 - Documented runtime controls for `executor_backpressure_enabled` and `executor_ready_timeout_seconds`.
 - Changed adaptive batch quality repair to be stage-aware: downstream-stage gaps such as materials, lighting, animation, camera, and render setup are carried as pending work instead of repeatedly repairing the current geometry batch.
 - Changed batch-quality repair accounting to use a separate quality-repair budget so iterative batch cleanup does not consume the step-level `max_replans` budget used for actual execution failures.
+- Updated project, addon, planning protocol examples, and tests to version `2.4.0`.
+- Updated the project license to a custom non-commercial license: personal non-commercial use and personal secondary development are allowed, but personal derivative work must stay open source and retain attribution/license notices.
 
 ### Fixed
 
@@ -31,6 +34,12 @@ The entries below focus on meaningful user-facing, architecture, and workflow ch
 - Fixed adaptive agent-loop batch repair loops that could exhaust `max_replans` when the analyzer reported future-stage work as current-stage `critical_issues`.
 - Fixed batch repair step ID collisions by reindexing repaired batch steps and clearing replaced batch results before replay.
 - Fixed unsafe batch repair plans that attempted to delete established prior parent/control objects while later repair steps still referenced them.
+- Fixed Blender 5.1 API compatibility docs checks for repositories that do not upload the local `reference/` docs bundle; the test now skips cleanly when docs are unavailable.
+
+### Docs
+
+- Updated README and README_CN with multimodal `--image` usage, LongCat Bearer authentication, executor health/backpressure behavior, optional Blender API reference validation, and license restrictions.
+- Updated release notes for the 2.4.0 functional changes.
 
 ### Tests
 
@@ -39,6 +48,8 @@ The entries below focus on meaningful user-facing, architecture, and workflow ch
   - `uv run pytest tests/test_feedback_control_errors.py tests/test_jsonrpc_ws.py tests/test_config_runtime.py tests/test_addon_self_check.py tests/test_feedback_system.py tests/test_client_scene_capture.py tests/test_client_replan_loop_guard.py -q`
   - `uv run pytest tests/test_feedback_system.py tests/test_client_replan_loop_guard.py -q`
   - `uv run pytest tests/test_feedback_system.py tests/test_client_replan_loop_guard.py tests/test_config_runtime.py -q`
+  - `uv run pytest tests/test_client_two_stage_planning.py tests/test_run_logging.py tests/test_openai_compat_adapter_response_format.py -q`
+  - `uv run pytest tests/test_cli_prompt_tokens.py tests/test_config_runtime.py tests/test_blender_51_api_docs_compat.py -q`
 
 ## [2.3.2] - 2026-04-28
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Vibe-Blender-Flow (VBF)",
     "author": "VBF",
-    "version": (0, 1, 0),
+    "version": (2, 4, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (not used)",
     "description": "JSON-RPC over WebSocket for High-Level Blender Skills",

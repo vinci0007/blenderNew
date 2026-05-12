@@ -30,7 +30,7 @@
 
 ```json
 {
-  "vbf_version": "2.1",
+  "vbf_version": "2.4.0",
   "plan_type": "skills_plan",
   "steps": [
     {
@@ -150,7 +150,7 @@
 **你**:
 ```json
 {
-  "vbf_version": "2.1",
+  "vbf_version": "2.4.0",
   "plan_type": "skills_plan",
   "steps": [
     {"step_id": "001", "skill": "create_primitive", "args": {"primitive_type": "cube", "name": "BeveledCube"}},
@@ -210,6 +210,6 @@
 
 ## 📝 版本
 
-- Prompt Version: 2.1.0-universal
+- Prompt Version: 2.4.0-universal
 - Supported Models: OpenAI GPT-4, Claude, GLM-4, Kimi, Qwen, MiniMax, Ollama
 - Last Updated: 2026-04-13

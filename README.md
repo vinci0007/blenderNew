@@ -6,7 +6,7 @@ Natural-language driven Blender modeling with staged planning, schema-aware skil
 
 **[Changelog](CHANGELOG.md)** | **[更新日志](CHANGELOG_CN.md)** | **[Release Notes](RELEASE_NOTES.md)**
 
-[![License](https://img.shields.io/badge/License-TBD-lightgray.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Custom%20Non--Commercial-lightgray.svg)](LICENSE)
 [![Blender](https://img.shields.io/badge/Blender-4.0%2B%20%7C%205.x-orange.svg)](https://www.blender.org/)
 [![Python](https://img.shields.io/badge/Python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/Tests-maintained-brightgreen.svg)]()
@@ -35,6 +35,8 @@ This keeps the workflow inspectable, resumable, and much easier to debug than di
 - Added stage-aware batch quality repair so future-stage gaps are deferred as pending work instead of trapping the current stage in repeated replans.
 - Added repair-plan safeguards so batch cleanup cannot delete established parent/control objects that later steps still reference.
 - Added multimodal planning input through `--image`, allowing reference images to be sent to vision-capable LLMs together with the text prompt.
+- Added optional Blender 5.1 API reference validation from local extracted docs or `reference/blender_python_reference_5_1.zip`; the test skips cleanly when reference docs are not checked into the repository.
+- Updated the project license to a custom non-commercial license. Personal use and personal secondary development are allowed, but derivative personal work must remain open source and retain author, repository, and license attribution.
 - Added task-scoped logging with short task IDs such as `task_0426-151232_43b4d1a8`.
 - Added per-task transcript logs that mirror all console stdout/stderr without truncating terminal output.
 - Added a daily plain-text run event log plus a separate per-task result JSON snapshot.
@@ -252,6 +254,10 @@ uv run pytest tests/ -q
 uv run pytest tests/test_config_runtime.py tests/test_client_two_stage_planning.py -q
 ```
 
+### Blender API docs compatibility
+
+`tests/test_blender_51_api_docs_compat.py` validates Blender operator usage when a local Blender 5.1 Python API reference is available. Keep the extracted docs or `reference/blender_python_reference_5_1.zip` locally if you want that validation; the repository does not require uploading the reference bundle, and the test skips when it is absent.
+
 ### Temporary test policy
 
 - Keep stable regression tests in `tests/`.
@@ -300,4 +306,4 @@ python -m pytest tests/task_tmp/test_example.py -q
 
 ## License
 
-TBD. See [LICENSE](LICENSE).
+Vibe-Blender-Flow uses a custom non-commercial license. Personal learning, research, evaluation, and personal non-commercial secondary development are allowed. Commercial use and enterprise commercial use are not permitted without separate authorization, and personal derivative work must be open source while retaining original author, repository, and license attribution. See [LICENSE](LICENSE).

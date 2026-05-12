@@ -593,7 +593,7 @@ signatures when they are available. `load_skill` remains documentation-only."""
 ## Output Format
 ```json
 {{
-  "vbf_version": "2.1",
+  "vbf_version": "2.4.0",
   "plan_type": "skills_plan",
   "steps": [
     {{
@@ -620,20 +620,20 @@ signatures when they are available. `load_skill` remains documentation-only."""
 
 **User:** "Create a cube"
 ```json
-{"vbf_version":"2.1","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"primitive_type":"cube","name":"Cube","location":[0,0,0]}}]}
+{"vbf_version":"2.4.0","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"primitive_type":"cube","name":"Cube","location":[0,0,0]}}]}
 ```
 
 **User:** "Add bevel to MixingGlass"
 ```json
-{"vbf_version":"2.1","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"add_modifier_bevel","args":{"object_name":"MixingGlass","width":0.02,"segments":4}}]}
+{"vbf_version":"2.4.0","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"add_modifier_bevel","args":{"object_name":"MixingGlass","width":0.02,"segments":4}}]}
 
 **User:** "Create a smooth sphere"
 ```json
-{"vbf_version":"2.1","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"primitive_type":"uv_sphere","name":"Sphere"}},{"step_id":"002","skill":"object_shade_smooth","args":{"object_name":"Sphere"}}]}
+{"vbf_version":"2.4.0","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"primitive_type":"uv_sphere","name":"Sphere"}},{"step_id":"002","skill":"object_shade_smooth","args":{"object_name":"Sphere"}}]}
 
 **User:** "Create a phone with power button"
 ```json
-{"vbf_version":"2.1","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"name":"phone","scale":[0.1,0.2,0.01]}},{"step_id":"002","skill":"create_primitive","args":{"name":"power_btn","location":[0.06,0,0]}},{"step_id":"003","skill":"set_parent","args":{"child_name":{"$ref":"002.data.object_name"},"parent_name":{"$ref":"001.data.object_name"}}}]}
+{"vbf_version":"2.4.0","plan_type":"skills_plan","steps":[{"step_id":"001","skill":"create_primitive","args":{"name":"phone","scale":[0.1,0.2,0.01]}},{"step_id":"002","skill":"create_primitive","args":{"name":"power_btn","location":[0.06,0,0]}},{"step_id":"003","skill":"set_parent","args":{"child_name":{"$ref":"002.data.object_name"},"parent_name":{"$ref":"001.data.object_name"}}}]}
 ```"""
 
         return base_prompt
@@ -1728,7 +1728,7 @@ signatures when they are available. `load_skill` remains documentation-only."""
                 }
             )
         return {
-            "vbf_version": "2.1",
+            "vbf_version": "2.4.0",
             "plan_type": "skills_plan",
             "steps": steps,
             "metadata": {

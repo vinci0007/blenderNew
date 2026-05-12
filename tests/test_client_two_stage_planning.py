@@ -48,7 +48,7 @@ async def test_two_stage_planning_merges_and_reindexes_refs(monkeypatch):
     async def _fake_plan(prompt, allowed_skills, save_path):
         if "STAGE 1 / GEOMETRY ONLY" in prompt:
             return (
-                {"vbf_version": "2.1", "plan_type": "skills_plan", "steps": []},
+                {"vbf_version": "2.4.0", "plan_type": "skills_plan", "steps": []},
                 [
                     {"step_id": "001", "skill": "create_primitive", "args": {"type": "cube"}},
                     {"step_id": "002", "skill": "create_primitive", "args": {"type": "cube"}},
@@ -56,7 +56,7 @@ async def test_two_stage_planning_merges_and_reindexes_refs(monkeypatch):
             )
         if "STAGE 2 / PRESENTATION ONLY" in prompt:
             return (
-                {"vbf_version": "2.1", "plan_type": "skills_plan", "steps": []},
+                {"vbf_version": "2.4.0", "plan_type": "skills_plan", "steps": []},
                 [
                     {"step_id": "001", "skill": "create_light", "args": {"light_type": "AREA"}},
                     {
@@ -470,7 +470,7 @@ async def test_adaptive_staged_planning_runs_stage_specific_skill_sets(monkeypat
     async def _fake_plan(prompt, allowed_skills, save_path):
         calls.append({"prompt": prompt, "skills": list(allowed_skills)})
         return (
-            {"vbf_version": "2.1", "plan_type": "skills_plan", "steps": []},
+            {"vbf_version": "2.4.0", "plan_type": "skills_plan", "steps": []},
             [{"step_id": "001", "skill": allowed_skills[0], "args": {}}],
         )
 
@@ -545,7 +545,7 @@ async def test_adaptive_batched_planning_splits_stage_batches(monkeypatch, tmp_p
         continue_stage = len(calls) == 1
         return (
             {
-                "vbf_version": "2.1",
+                "vbf_version": "2.4.0",
                 "plan_type": "skills_plan",
                 "steps": [],
                 "continue_stage": continue_stage,
@@ -607,7 +607,7 @@ async def test_adaptive_agent_loop_plans_only_first_batch(monkeypatch, tmp_path)
         calls.append(prompt)
         return (
             {
-                "vbf_version": "2.1",
+                "vbf_version": "2.4.0",
                 "plan_type": "skills_plan",
                 "steps": [],
                 "continue_stage": True,

@@ -4,27 +4,25 @@ This file summarizes user-facing release highlights. Detailed patch history rema
 
 Release automation uses `pyproject.toml` `[project].version` as the single version source. Versions use numeric `x.x.x` format, and each segment may contain multiple digits, such as `2.13.105`. Automatic GitHub Releases are created only for major/minor release versions where the first or second segment increases and the third segment is `0`, such as `1.0.0` or `1.1.0`; manual workflow runs may publish any numeric `x.x.x` project version.
 
-## 2.3.2
+## 2.4.0
 
-Focus: staged planning reliability, task isolation, logs, and feedback stability.
+Focus: multimodal planning input, provider compatibility, safer Blender executor recovery, and release/license alignment.
 
 Highlights:
 
-- Added task-scoped logs and result snapshots under `vbf/logs/`.
-- Added scene isolation so old task objects do not leak into new planning, feedback, or replan context by default.
-- Made adaptive requirement assessment LLM-first in `auto` mode.
-- Changed local simple-model checks into advisory evidence instead of a hard override.
-- Clarified that `uv_texture_material` covers UVs, texture setup, simple color assignment, material assignment, and PBR/material presets.
-- Reduced feedback Analyzer calls by grouping small plan-stage transitions into major/adaptive analysis stages.
-- Added conservative repair for near-valid Analyzer JSON with missing closing brackets.
-- Changed default prompt styling so no style template is prepended unless `--style` is passed explicitly.
-- Added local autofix for `create_material_simple` plans missing `base_color`.
-- Improved Blender diagnostics around modifier order and `remove_doubles` vertex merge reporting.
+- Added `--image` / `--image-file` so prompt text and one or more reference images can be sent together to vision-capable LLM providers.
+- Added `auth_scheme = "auto" | "bearer" | "x-api-key"` so Anthropic Messages-compatible gateways such as LongCat can use Bearer authentication without changing the request-body protocol.
+- Added executor health telemetry, `vbf.recover_executor`, client-side backpressure, and queued-job deadlines to recover stale Blender app-timer polling without interrupting an active skill.
+- Made adaptive batch quality repair stage-aware, carrying future-stage gaps forward as pending work instead of repeatedly repairing the current geometry batch.
+- Protected batch repair from deleting established parent/control objects that later repair steps still reference.
+- Updated project package version, Blender addon version, planning protocol examples, tests, changelog, and release notes to `2.4.0`.
+- Updated the license to a custom non-commercial license. Personal non-commercial use and personal secondary development are allowed, but personal derivative work must stay open source and retain original author, repository, and license attribution.
+- Updated Blender 5.1 API docs compatibility checks so local extracted docs or `reference/blender_python_reference_5_1.zip` can be used, while missing reference docs skip cleanly in repositories that do not upload the docs bundle.
 
 Validation:
 
-- `uv run pytest tests/test_client_two_stage_planning.py -q`
-- `uv run pytest tests/test_openai_compat_adapter_response_format.py tests/test_feedback_control_errors.py tests/test_feedback_system.py -q`
+- `uv run pytest tests/test_client_two_stage_planning.py tests/test_run_logging.py tests/test_openai_compat_adapter_response_format.py -q`
+- `uv run pytest tests/test_cli_prompt_tokens.py tests/test_config_runtime.py tests/test_blender_51_api_docs_compat.py -q`
 
 ## 2.2
 
