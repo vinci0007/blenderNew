@@ -2,6 +2,12 @@ import pytest
 from unittest.mock import AsyncMock
 
 from vbf.app.client import VBFClient
+from vbf.app.plan_gate import (
+    build_prior_object_table,
+    matches_expected_type,
+    validate_and_repair_parent_refs,
+)
+from vbf.core.plan_normalization import normalize_plan
 
 
 class _SchemaAdapter:
@@ -16,12 +22,38 @@ class _SchemaAdapter:
             return {
                 "primitive_type": {"required": True, "type": "str", "default": None},
                 "name": {"required": False, "type": "str", "default": None},
+                "location": {"required": False, "type": "list", "default": None},
+                "rotation_euler": {"required": False, "type": "list", "default": None},
+                "scale": {"required": False, "type": "list", "default": None},
+                "size": {"required": False, "type": "list", "default": None},
+                "radius": {"required": False, "type": "float", "default": None},
+                "height": {"required": False, "type": "float", "default": None},
             }
         if skill_name == "create_beveled_box":
             return {
                 "name": {"required": True, "type": "str", "default": None},
                 "size": {"required": True, "type": "list", "default": None},
                 "location": {"required": True, "type": "list", "default": None},
+            }
+        if skill_name == "create_panel":
+            return {
+                "name": {"required": True, "type": "str", "default": None},
+                "size": {"required": True, "type": "list", "default": None},
+                "location": {"required": True, "type": "list", "default": None},
+            }
+        if skill_name == "create_transformable_panel":
+            return {
+                "name": {"required": True, "type": "str", "default": None},
+                "size": {"required": True, "type": "list", "default": None},
+                "location": {"required": True, "type": "list", "default": None},
+                "rotation_euler": {"required": False, "type": "list", "default": None},
+            }
+        if skill_name == "apply_transform":
+            return {
+                "object_name": {"required": True, "type": "str", "default": None},
+                "rotation_euler": {"required": False, "type": "list", "default": None},
+                "scale": {"required": False, "type": "list", "default": None},
+                "location": {"required": False, "type": "list", "default": None},
             }
         if skill_name == "mark_edge_crease":
             return {
@@ -140,6 +172,102 @@ def test_plan_gate_autofix_fill_create_primitive_and_drop_unknown_args():
     assert "bad_arg" not in steps[0]["args"]
 
 
+def test_plan_gate_list_hint_rejects_scalar_float():
+    assert matches_expected_type("List[float] | None", [1.0, 2.0, 3.0])
+    assert not matches_expected_type("List[float] | None", 1.0)
+
+
+def test_plan_gate_autofix_create_primitive_numeric_cube_size():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "001",
+                "skill": "create_primitive",
+                "args": {"primitive_type": "cube", "name": "Root", "size": 1.0},
+            }
+        ]
+    }
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_primitive"],
+    )
+
+    assert steps[0]["args"]["size"] == [1.0, 1.0, 1.0]
+
+
+def test_normalize_plan_converts_create_primitive_numeric_size():
+    plan = normalize_plan(
+        {
+            "steps": [
+                {
+                    "step_id": "001",
+                    "skill": "create_primitive",
+                    "args": {"primitive_type": "cube", "size": 1.0},
+                }
+            ]
+        }
+    )
+
+    assert plan["steps"][0]["args"]["size"] == [1.0, 1.0, 1.0]
+
+
+def test_prior_object_table_and_parent_name_repair():
+    prior = build_prior_object_table(
+        [
+            {
+                "created_objects": [
+                    {
+                        "step_id": "003",
+                        "skill": "create_primitive",
+                        "planned_name": "GEO_Turntable_Rotation_Control",
+                        "object_name": "GEO_Turntable_Rotation_Control",
+                    }
+                ]
+            }
+        ]
+    )
+    plan = {
+        "steps": [
+            {
+                "step_id": "014",
+                "skill": "set_parent",
+                "args": {
+                    "child_name": {"$ref": "step_013.data.object_name"},
+                    "parent_name": "Hypercar_Turntable_Control",
+                    "keep_transform": True,
+                },
+            }
+        ]
+    }
+
+    repaired = validate_and_repair_parent_refs(plan, prior)
+
+    assert repaired == 1
+    assert plan["steps"][0]["args"]["parent_name"] == "GEO_Turntable_Rotation_Control"
+
+
+def test_parent_name_without_unique_match_fails_plan_gate():
+    prior = [
+        {"object_name": "GEO_Left_Wheel_Control"},
+        {"object_name": "GEO_Right_Wheel_Control"},
+    ]
+    plan = {
+        "steps": [
+            {
+                "step_id": "014",
+                "skill": "set_parent",
+                "args": {"child_name": "GEO_New", "parent_name": "Wheel_Control"},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="plan_gate_unknown_parent_object"):
+        validate_and_repair_parent_refs(plan, prior)
+
+
 def test_plan_gate_autofix_fill_create_material_simple_base_color():
     client = VBFClient()
     adapter = _SchemaAdapter()
@@ -214,6 +342,135 @@ def test_plan_gate_autofix_create_beveled_box_object_name_to_name():
 
     assert steps[0]["args"]["name"] == "Volume_Up_Button"
     assert "object_name" not in steps[0]["args"]
+
+
+def test_plan_gate_splits_unsupported_rotation_to_apply_transform():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = normalize_plan(
+        {
+            "steps": [
+                {
+                    "step_id": "013",
+                    "stage": "geometry_modeling",
+                    "skill": "create_beveled_box",
+                    "args": {
+                        "object_name": "GEO_Hood_Vent",
+                        "dimensions": [0.42, 0.095, 0.018],
+                        "location": [0.69, 0.205, 0.435],
+                        "rotation": [0.0, -0.08, 0.0],
+                    },
+                }
+            ]
+        }
+    )
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_beveled_box", "apply_transform"],
+    )
+
+    assert len(steps) == 2
+    assert steps[0]["skill"] == "create_beveled_box"
+    assert steps[0]["args"]["name"] == "GEO_Hood_Vent"
+    assert steps[0]["args"]["size"] == [0.42, 0.095, 0.018]
+    assert "rotation" not in steps[0]["args"]
+    assert steps[1]["skill"] == "apply_transform"
+    assert steps[1]["args"]["object_name"] == {"$ref": "step_013.data.object_name"}
+    assert steps[1]["args"]["rotation_euler"] == [0.0, -0.08, 0.0]
+
+
+def test_plan_gate_splits_transform_args_for_generic_creation_skill():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "panel",
+                "skill": "create_panel",
+                "args": {
+                    "name": "GEO_Generic_Panel",
+                    "size": [1.0, 0.2, 0.05],
+                    "location": [0.0, 0.0, 0.0],
+                    "rotation_euler": [0.0, 0.0, 0.2],
+                },
+            }
+        ]
+    }
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_panel", "apply_transform"],
+    )
+
+    assert [step["skill"] for step in steps] == ["create_panel", "apply_transform"]
+    assert "rotation_euler" not in steps[0]["args"]
+    assert steps[1]["args"] == {
+        "object_name": {"$ref": "step_panel.data.object_name"},
+        "rotation_euler": [0.0, 0.0, 0.2],
+    }
+
+
+def test_plan_gate_schema_aliases_are_generic_for_supported_signatures():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "panel",
+                "skill": "create_transformable_panel",
+                "args": {
+                    "object_name": "GEO_Generic_Panel",
+                    "dimensions": [1.0, 0.2, 0.05],
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.2],
+                },
+            }
+        ]
+    }
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_transformable_panel"],
+    )
+
+    assert steps[0]["args"] == {
+        "name": "GEO_Generic_Panel",
+        "size": [1.0, 0.2, 0.05],
+        "location": [0.0, 0.0, 0.0],
+        "rotation_euler": [0.0, 0.0, 0.2],
+    }
+
+
+def test_plan_gate_schema_aliases_name_to_object_name_when_signature_requires_target():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "transform",
+                "skill": "apply_transform",
+                "args": {
+                    "name": "GEO_Generic_Panel",
+                    "rotation_euler": [0.0, 0.0, 0.2],
+                },
+            }
+        ]
+    }
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["apply_transform"],
+    )
+
+    assert steps[0]["args"] == {
+        "object_name": "GEO_Generic_Panel",
+        "rotation_euler": [0.0, 0.0, 0.2],
+    }
 
 
 def test_plan_gate_autofix_aliases_stage2_parameter_names():
@@ -305,6 +562,90 @@ def test_plan_gate_autofix_handles_more_than_four_repairs():
     assert steps[2]["args"]["focal_length"] == 50
     assert steps[3]["args"]["rotation_euler"] == [0.0, 0.0, 0.0]
     assert steps[4]["args"]["rotation_euler"] == [0.1, 0.0, 0.0]
+
+
+def test_plan_gate_accepts_normalized_primitive_skill_alias():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = normalize_plan(
+        {
+            "steps": [
+                {
+                    "step_id": "001",
+                    "skill": "create_cylinder",
+                    "args": {
+                        "name": "GEO_Display_Turntable",
+                        "location": [0.0, 0.0, -0.06],
+                        "radius": 1.55,
+                        "depth": 0.08,
+                    },
+                }
+            ]
+        }
+    )
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_primitive"],
+    )
+
+    assert steps[0]["skill"] == "create_primitive"
+    assert steps[0]["args"]["primitive_type"] == "cylinder"
+    assert steps[0]["args"]["height"] == 0.08
+
+
+def test_plan_gate_autofix_replaces_unsupported_torus_primitive():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "001",
+                "skill": "create_primitive",
+                "args": {
+                    "primitive_type": "torus",
+                    "name": "GEO_Left_Front_Tire",
+                    "location": [0.8, -0.5, 0.2],
+                    "radius": 0.2,
+                    "height": 0.08,
+                },
+            }
+        ]
+    }
+
+    steps = client._validate_plan_with_schema_autofix(
+        plan,
+        adapter,
+        ["create_primitive"],
+    )
+
+    assert steps[0]["args"]["primitive_type"] == "cylinder"
+
+
+def test_plan_gate_rejects_unknown_primitive_type():
+    client = VBFClient()
+    adapter = _SchemaAdapter()
+    plan = {
+        "steps": [
+            {
+                "step_id": "001",
+                "skill": "create_primitive",
+                "args": {
+                    "primitive_type": "plane",
+                    "name": "GEO_Panel",
+                    "location": [0, 0, 0],
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="plan_gate_invalid_primitive_type"):
+        client._validate_plan_with_schema_autofix(
+            plan,
+            adapter,
+            ["create_primitive"],
+        )
 
 
 @pytest.mark.asyncio

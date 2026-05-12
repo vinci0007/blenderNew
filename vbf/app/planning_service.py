@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -8,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..core.plan_normalization import extract_skills_plan, normalize_plan, validate_plan_structure
 from ..core.scene_state import SceneState
+from ..core.task_ledger import TaskLedger, ledger_path_for_task
 from ..core.task_state import TaskInterruptedError
 from .planning_context import (
     build_json_format_retry_prompt,
@@ -15,6 +15,11 @@ from .planning_context import (
     has_nonempty_steps,
     is_tool_calls_payload,
     scene_to_prompt_text,
+)
+from .plan_gate import build_prior_object_table, validate_and_repair_parent_refs
+from .skill_capability_resolver import (
+    format_skill_capability_resolution,
+    resolve_skill_capability_issue,
 )
 from .stage_intent import (
     StageIntent,
@@ -142,6 +147,35 @@ def _build_requirement_resolution_prompt(
     )
 
 
+async def _call_requirement_assessment_llm(
+    client: Any,
+    messages: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Call requirement assessment without forcing skill-registry initialization.
+
+    Requirement assessment is an LLM classification task and does not need
+    Blender skill schemas. Keeping this call lightweight avoids a duplicate
+    vbf.list_skills RPC before the actual planning call.
+    """
+    try:
+        return await client._adapter_call(
+            messages,
+            load_skills=False,
+            allow_tools=False,
+        )
+    except TypeError as exc:
+        # Some tests or external clients monkeypatch _adapter_call with the old
+        # one-argument signature. Keep that compatibility path narrow.
+        message = str(exc)
+        if (
+            "unexpected keyword" not in message
+            and "positional" not in message
+            and "keyword argument" not in message
+        ):
+            raise
+        return await client._adapter_call(messages)
+
+
 async def call_plan_with_format_retry(
     client: Any,
     adapter: Any,
@@ -223,7 +257,15 @@ async def assess_adaptive_stage_intent(client: Any, prompt: str) -> StageIntent:
             {"role": "user", "content": prompt_text},
         ]
         timeout_seconds = max(1.0, float(cfg.get("timeout_seconds", 45)))
-        payload = await asyncio.wait_for(client._adapter_call(messages), timeout=timeout_seconds)
+        if mode == "always":
+            payload = await _call_requirement_assessment_llm(client, messages)
+        else:
+            # In auto mode the adapter may still be initializing and loading skill
+            # schemas from Blender. Do not wrap this in an outer wait_for, because
+            # cancelling the WebSocket list_skills call can leave the adapter in a
+            # half-initialized state. The adapter/rate-limiter HTTP timeout still
+            # bounds the actual provider request.
+            payload = await _call_requirement_assessment_llm(client, messages)
         low_confidence_threshold = max(
             0.0,
             min(1.0, float(cfg.get("low_confidence_threshold", 0.7))),
@@ -267,10 +309,16 @@ async def assess_adaptive_stage_intent(client: Any, prompt: str) -> StageIntent:
                     },
                     {"role": "user", "content": resolution_prompt},
                 ]
-                resolution_payload = await asyncio.wait_for(
-                    client._adapter_call(resolution_messages),
-                    timeout=timeout_seconds,
-                )
+                if mode == "always":
+                    resolution_payload = await _call_requirement_assessment_llm(
+                        client,
+                        resolution_messages,
+                    )
+                else:
+                    resolution_payload = await _call_requirement_assessment_llm(
+                        client,
+                        resolution_messages,
+                    )
                 intent = client._normalize_assessed_stage_intent(
                     resolution_payload,
                     intent,
@@ -290,25 +338,32 @@ async def assess_adaptive_stage_intent(client: Any, prompt: str) -> StageIntent:
         )
         return intent
     except Exception as e:
-        if fallback is None:
-            print(f"[VBF] requirement_assessment failed_no_local_fallback: {e}")
+        fallback_for_error = fallback
+        if fallback_for_error is None:
+            print(
+                "[VBF] requirement_assessment "
+                f"llm_failed_local_fallback_disabled: {e}"
+            )
             raise RuntimeError(
-                f"requirement_assessment_failed_no_local_fallback: {e}"
+                f"requirement_assessment_llm_failed_local_fallback_disabled: {e}"
             ) from e
         print(f"[VBF] requirement_assessment fallback_to_local: {e}")
-        if str(cfg.get("fallback_policy", "preserve_more_stages")) == "preserve_more_stages" and fallback.confidence < 0.7:
-            preserved = list(fallback.stages)
+        if (
+            str(cfg.get("fallback_policy", "preserve_more_stages")) == "preserve_more_stages"
+            and fallback_for_error.confidence < 0.7
+        ):
+            preserved = list(fallback_for_error.stages)
             for stage in ("uv_texture_material", "environment_lighting", "camera_render"):
                 if stage not in preserved:
                     preserved.append(stage)
             return StageIntent(
                 stages=preserved,
                 primary_stage=preserved[-1],
-                confidence=fallback.confidence,
+                confidence=fallback_for_error.confidence,
                 explicit_scope="local_fallback_preserved",
-                has_conflict=fallback.has_conflict,
+                has_conflict=fallback_for_error.has_conflict,
             )
-        return fallback
+        return fallback_for_error
 
 
 async def plan_skill_task_adaptive_staged(
@@ -319,6 +374,219 @@ async def plan_skill_task_adaptive_staged(
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     stage_intent = await client._assess_adaptive_stage_intent(prompt)
     stages = stage_intent.stages
+    planning_loop = client._get_planning_loop_config()
+    loop_mode = str(planning_loop.get("mode", "full_plan") or "full_plan").strip().lower()
+    if loop_mode in {"agent_loop", "plan_execute_loop", "interleaved"}:
+        max_steps = max(1, int(planning_loop.get("max_steps_per_batch", 12)))
+        max_batches = max(1, int(planning_loop.get("max_batches_per_stage", 8)))
+        stage_index = 0
+        stage = stages[stage_index]
+        stage_skills = client._filter_skills_for_adaptive_stage(allowed_skills, stage)
+        if not stage_skills:
+            raise ValueError(
+                "planning_context_missing_stage_skill_coverage: "
+                f"stage={stage}"
+            )
+        stage_prompt = client._build_batched_stage_prompt(
+            prompt=prompt,
+            stage=stage,
+            batch_index=1,
+            max_steps=max_steps,
+            completed_summary=[],
+            pending_work=[],
+        )
+        batch_plan, batch_steps = await client._plan_skill_task(
+            stage_prompt,
+            stage_skills,
+            save_path,
+        )
+        remapped_steps = client._reindex_steps(batch_steps, 1)
+        for step in remapped_steps:
+            if isinstance(step, dict):
+                step.setdefault("stage", stage)
+                step["adaptive_stage"] = stage
+                step["batch_index"] = 1
+        continue_stage = _infer_continue_stage(batch_plan, batch_steps, max_steps)
+        pending_work = _extract_remaining_work(batch_plan)
+
+        task_id = getattr(client, "_task_id", "planning")
+        runtime_paths = getattr(client, "_runtime_paths", {}) or {}
+        ledger_path = ledger_path_for_task(
+            runtime_paths.get("cache_dir", os.path.dirname(save_path)),
+            task_id,
+        )
+        ledger = TaskLedger(task_id=str(task_id or "planning"), prompt=prompt, stages=stages)
+        ledger.current_stage_index = stage_index
+        ledger.record_planned_batch(
+            stage=stage,
+            batch_index=1,
+            step_ids=[str(step.get("step_id")) for step in remapped_steps if step.get("step_id")],
+            continue_stage=continue_stage,
+            remaining_work=pending_work,
+            response_id=batch_plan.get("response_id") if isinstance(batch_plan, dict) else None,
+        )
+        if bool(planning_loop.get("save_partial_plan", True)):
+            ledger.save(ledger_path)
+
+        plan: Dict[str, Any] = {
+            "vbf_version": "2.1",
+            "plan_type": "skills_plan",
+            "steps": remapped_steps,
+            "metadata": {
+                "planning_mode": "adaptive_agent_loop",
+                "stages": stages,
+                "current_stage_index": stage_index,
+                "current_stage": stage,
+                "batch_index": 1,
+                "max_steps_per_batch": max_steps,
+                "max_batches_per_stage": max_batches,
+                "continue_stage": continue_stage,
+                "remaining_work": pending_work,
+                "ledger_path": ledger_path,
+            },
+        }
+        plan = normalize_plan(plan)
+        steps = validate_plan_structure(plan)
+        print(
+            "[VBF] planning_mode=adaptive_agent_loop "
+            f"stage={stage} batch=1 steps={len(steps)} "
+            f"continue_stage={str(continue_stage).lower()} ledger={ledger_path}"
+        )
+        return plan, steps
+
+    if loop_mode in {"batched", "batch"}:
+        max_steps = max(1, int(planning_loop.get("max_steps_per_batch", 12)))
+        max_batches = max(1, int(planning_loop.get("max_batches_per_stage", 8)))
+        all_steps: List[Dict[str, Any]] = []
+        stage_counts: Dict[str, int] = {}
+        completed_summary: List[Dict[str, Any]] = []
+        pending_work: List[str] = []
+        task_id = getattr(client, "_task_id", "planning")
+        runtime_paths = getattr(client, "_runtime_paths", {}) or {}
+        ledger_path = ledger_path_for_task(
+            runtime_paths.get("cache_dir", os.path.dirname(save_path)),
+            task_id,
+        )
+        ledger = TaskLedger(task_id=str(task_id or "planning"), prompt=prompt, stages=stages)
+
+        for stage_index, stage in enumerate(stages):
+            stage_steps_total = 0
+            pending_work = []
+            for batch_index in range(1, max_batches + 1):
+                stage_skills = client._filter_skills_for_adaptive_stage(allowed_skills, stage)
+                if not stage_skills:
+                    raise ValueError(
+                        "planning_context_missing_stage_skill_coverage: "
+                        f"stage={stage}"
+                    )
+                stage_prompt = client._build_batched_stage_prompt(
+                    prompt=prompt,
+                    stage=stage,
+                    batch_index=batch_index,
+                    max_steps=max_steps,
+                    completed_summary=completed_summary,
+                    pending_work=pending_work,
+                )
+                try:
+                    batch_plan, batch_steps = await client._plan_skill_task(
+                        stage_prompt,
+                        stage_skills,
+                        save_path,
+                    )
+                except Exception as e:
+                    partial_plan = {
+                        "vbf_version": "2.1",
+                        "plan_type": "skills_plan",
+                        "steps": all_steps,
+                        "metadata": {
+                            "planning_mode": "adaptive_batched",
+                            "stages": stages,
+                            "failed_stage": stage,
+                            "failed_batch_index": batch_index,
+                            "ledger_path": ledger_path,
+                        },
+                    }
+                    ledger.last_error = str(e)
+                    if bool(planning_loop.get("save_partial_plan", True)):
+                        ledger.save(ledger_path)
+                    raise client._create_interrupt(
+                        f"Batched plan generation failed at stage={stage} batch={batch_index}",
+                        prompt,
+                        save_path,
+                        plan=partial_plan,
+                        steps=all_steps,
+                        allowed_skills=allowed_skills,
+                        diagnostics={
+                            "planning_loop": {
+                                "mode": "batched",
+                                "failed_stage": stage,
+                                "failed_batch_index": batch_index,
+                                "ledger_path": ledger_path,
+                            }
+                        },
+                        cause=e,
+                    )
+                remapped_steps = client._reindex_steps(batch_steps, len(all_steps) + 1)
+                for step in remapped_steps:
+                    if isinstance(step, dict):
+                        step.setdefault("stage", stage)
+                        step["adaptive_stage"] = stage
+                        step["batch_index"] = batch_index
+                all_steps.extend(remapped_steps)
+                stage_steps_total += len(remapped_steps)
+                continue_stage = _infer_continue_stage(batch_plan, batch_steps, max_steps)
+                pending_work = _extract_remaining_work(batch_plan)
+                step_ids = [str(step.get("step_id")) for step in remapped_steps if step.get("step_id")]
+                ledger.current_stage_index = stage_index
+                ledger.record_planned_batch(
+                    stage=stage,
+                    batch_index=batch_index,
+                    step_ids=step_ids,
+                    continue_stage=continue_stage,
+                    remaining_work=pending_work,
+                    response_id=batch_plan.get("response_id") if isinstance(batch_plan, dict) else None,
+                )
+                if bool(planning_loop.get("save_partial_plan", True)):
+                    ledger.save(ledger_path)
+                completed_summary.append(
+                    {
+                        "stage": stage,
+                        "batch_index": batch_index,
+                        "steps": len(remapped_steps),
+                        "step_ids": step_ids,
+                        "remaining_work": pending_work,
+                    }
+                )
+                if not continue_stage:
+                    break
+            stage_counts[stage] = stage_steps_total
+            ledger.advance_stage()
+
+        if not all_steps:
+            raise ValueError("adaptive_batched planning produced no executable steps")
+
+        merged_plan: Dict[str, Any] = {
+            "vbf_version": "2.1",
+            "plan_type": "skills_plan",
+            "steps": all_steps,
+            "metadata": {
+                "planning_mode": "adaptive_batched",
+                "stages": stages,
+                "stage_step_counts": stage_counts,
+                "max_steps_per_batch": max_steps,
+                "max_batches_per_stage": max_batches,
+                "ledger_path": ledger_path,
+            },
+        }
+        merged_plan = normalize_plan(merged_plan)
+        merged_steps = validate_plan_structure(merged_plan)
+        print(
+            "[VBF] planning_mode=adaptive_batched "
+            f"stages={','.join(stages)} "
+            f"steps={len(merged_steps)} "
+            f"ledger={ledger_path}"
+        )
+        return merged_plan, merged_steps
     if stages == ["geometry_modeling"]:
         return await client._plan_skill_task(
             client._build_adaptive_stage_prompt(prompt, "geometry_modeling"),
@@ -368,6 +636,135 @@ async def plan_skill_task_adaptive_staged(
     merged_plan = normalize_plan(merged_plan)
     merged_steps = validate_plan_structure(merged_plan)
     return merged_plan, merged_steps
+
+
+def _extract_remaining_work(plan: Dict[str, Any]) -> List[str]:
+    remaining = plan.get("remaining_work")
+    if isinstance(remaining, list):
+        return [str(item) for item in remaining if str(item).strip()]
+    metadata = plan.get("metadata") if isinstance(plan.get("metadata"), dict) else {}
+    remaining = metadata.get("remaining_work")
+    if isinstance(remaining, list):
+        return [str(item) for item in remaining if str(item).strip()]
+    return []
+
+
+def _infer_continue_stage(
+    plan: Dict[str, Any],
+    steps: List[Dict[str, Any]],
+    max_steps: int,
+) -> bool:
+    for source in (plan, plan.get("metadata") if isinstance(plan.get("metadata"), dict) else {}):
+        value = source.get("continue_stage") if isinstance(source, dict) else None
+        if isinstance(value, bool):
+            return value
+    return len(steps) >= max_steps
+
+
+def build_batched_stage_prompt(
+    client: Any,
+    *,
+    prompt: str,
+    stage: str,
+    batch_index: int,
+    max_steps: int,
+    completed_summary: List[Dict[str, Any]],
+    pending_work: List[str],
+) -> str:
+    completed_text = json.dumps(completed_summary[-8:], ensure_ascii=False, default=str)
+    pending_text = json.dumps(pending_work, ensure_ascii=False, default=str)
+    prior_objects = build_prior_object_table(completed_summary)
+    prior_objects_text = json.dumps(prior_objects[-40:], ensure_ascii=False, default=str)
+    base = client._build_adaptive_stage_prompt(prompt, stage)
+    return (
+        f"{base}\n\n"
+        "PLANNING LOOP: BATCHED EXECUTION.\n"
+        f"- Generate ONLY the next batch for stage `{stage}`.\n"
+        f"- Batch index: {batch_index}.\n"
+        f"- Hard limit: return at most {max_steps} executable steps.\n"
+        "- Do not try to complete the entire user request in this response.\n"
+        "- Use existing object names from PRIOR BATCH OBJECT TABLE directly; do not $ref prior batch steps.\n"
+        "- For set_parent.parent_name, use exactly one listed object_name or a parent created earlier in this same batch.\n"
+        "- Do not invent synonymous parent names such as Hypercar_Turntable_Control if they are not listed.\n"
+        "- If this stage needs more work after this batch, set top-level `continue_stage` to true.\n"
+        "- If this stage is complete after this batch, set top-level `continue_stage` to false.\n"
+        "- Include top-level `remaining_work` as short strings for the next batch.\n"
+        "- Return one JSON object with top-level `steps`, `continue_stage`, and `remaining_work`.\n\n"
+        f"COMPLETED BATCH SUMMARY:\n{completed_text}\n\n"
+        f"PRIOR BATCH OBJECT TABLE:\n{prior_objects_text}\n\n"
+        f"PENDING WORK FROM PRIOR BATCH:\n{pending_text}\n"
+    )
+
+
+async def plan_next_batched_stage(
+    client: Any,
+    *,
+    prompt: str,
+    allowed_skills: List[str],
+    save_path: str,
+    previous_plan: Dict[str, Any],
+    completed_summary: List[Dict[str, Any]],
+    pending_work: List[str],
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    metadata = previous_plan.get("metadata") if isinstance(previous_plan.get("metadata"), dict) else {}
+    planning_mode = metadata.get("planning_mode")
+    if planning_mode not in {"adaptive_batched", "adaptive_agent_loop"}:
+        return None, []
+
+    stages = list(metadata.get("stages") or ["geometry_modeling"])
+    stage_index = int(metadata.get("current_stage_index") or 0)
+    batch_index = int(metadata.get("batch_index") or 1)
+    max_steps = max(1, int(metadata.get("max_steps_per_batch") or 12))
+    continue_stage = bool(metadata.get("continue_stage", False))
+    max_batches_per_stage = max(
+        1,
+        int(client._get_planning_loop_config().get("max_batches_per_stage", 8)),
+    )
+
+    if continue_stage and batch_index < max_batches_per_stage:
+        next_stage_index = stage_index
+        next_batch_index = batch_index + 1
+    else:
+        next_stage_index = stage_index + 1
+        next_batch_index = 1
+
+    if next_stage_index >= len(stages):
+        return None, []
+
+    stage = stages[next_stage_index]
+    stage_skills = client._filter_skills_for_adaptive_stage(allowed_skills, stage)
+    if not stage_skills:
+        raise ValueError(
+            "planning_context_missing_stage_skill_coverage: "
+            f"stage={stage}"
+        )
+    stage_prompt = build_batched_stage_prompt(
+        client,
+        prompt=prompt,
+        stage=stage,
+        batch_index=next_batch_index,
+        max_steps=max_steps,
+        completed_summary=completed_summary,
+        pending_work=pending_work,
+    )
+    plan, steps = await client._plan_skill_task(stage_prompt, stage_skills, save_path)
+    plan.setdefault("metadata", {})
+    plan["metadata"].update(
+        {
+            "planning_mode": planning_mode,
+            "stages": stages,
+            "current_stage_index": next_stage_index,
+            "current_stage": stage,
+            "batch_index": next_batch_index,
+            "max_steps_per_batch": max_steps,
+            "continue_stage": _infer_continue_stage(plan, steps, max_steps),
+            "remaining_work": _extract_remaining_work(plan),
+        }
+    )
+    prior_objects = build_prior_object_table(completed_summary)
+    if prior_objects:
+        validate_and_repair_parent_refs(plan, prior_objects)
+    return plan, steps
 
 
 async def plan_skill_task_two_stage(
@@ -498,6 +895,7 @@ async def plan_skill_task(
             seen_subset_keys.add(subset_key)
             raw_plan: Any = None
             raw_plan_snapshot: Any = None
+            plan: Optional[Dict[str, Any]] = None
 
             print(
                 "[VBF] planning_subset "
@@ -517,16 +915,35 @@ async def plan_skill_task(
                 return plan, steps
             except ValueError as e:
                 last_error = e
+                capability_resolution = {}
+                capability_text = ""
+                if plan is not None and "plan_gate_" in str(e):
+                    capability_resolution = resolve_skill_capability_issue(
+                        adapter=adapter,
+                        allowed_skills=skill_subset,
+                        plan=plan,
+                        error_message=str(e),
+                    )
+                    capability_text = format_skill_capability_resolution(capability_resolution)
+                    if capability_text:
+                        print(
+                            "[VBF] skill_capability_resolution "
+                            f"classification={capability_resolution.get('classification')}",
+                            flush=True,
+                        )
                 client._record_plan_shape_failure(
-                    str(e),
+                    f"{e}\n\n{capability_text}" if capability_text else str(e),
                     raw_plan_snapshot if raw_plan_snapshot is not None else raw_plan,
                     stage="plan_round",
                 )
                 if not client._is_recoverable_plan_error(str(e)):
                     raise
                 repair_prompt = client._build_plan_repair_prompt(prompt, str(e))
+                if capability_text:
+                    repair_prompt = f"{repair_prompt}\n\n{capability_text}\n"
                 repaired_raw_plan: Any = None
                 repaired_raw_plan_snapshot: Any = None
+                repaired_plan: Optional[Dict[str, Any]] = None
                 try:
                     repaired_raw_plan = await client._call_plan_with_format_retry(
                         adapter,
@@ -538,13 +955,33 @@ async def plan_skill_task(
                         repaired_raw_plan_snapshot,
                         stage="plan_round_repair",
                     )
-                    plan = normalize_plan(repaired_raw_plan)
-                    steps = client._validate_plan_with_schema_autofix(plan, adapter, skill_subset)
-                    return plan, steps
+                    repaired_plan = normalize_plan(repaired_raw_plan)
+                    steps = client._validate_plan_with_schema_autofix(repaired_plan, adapter, skill_subset)
+                    return repaired_plan, steps
                 except ValueError as repair_err:
                     last_error = repair_err
+                    repair_capability_text = ""
+                    if repaired_plan is not None and "plan_gate_" in str(repair_err):
+                        repair_resolution = resolve_skill_capability_issue(
+                            adapter=adapter,
+                            allowed_skills=skill_subset,
+                            plan=repaired_plan,
+                            error_message=str(repair_err),
+                        )
+                        repair_capability_text = format_skill_capability_resolution(repair_resolution)
+                        if repair_capability_text:
+                            print(
+                                "[VBF] skill_capability_resolution "
+                                f"classification={repair_resolution.get('classification')} "
+                                "stage=plan_round_repair",
+                                flush=True,
+                            )
                     client._record_plan_shape_failure(
-                        str(repair_err),
+                        (
+                            f"{repair_err}\n\n{repair_capability_text}"
+                            if repair_capability_text
+                            else str(repair_err)
+                        ),
                         repaired_raw_plan_snapshot
                         if repaired_raw_plan_snapshot is not None
                         else repaired_raw_plan,
@@ -655,6 +1092,12 @@ async def replan_from_step(
     failed_skill = failed_step.get("skill", "unknown")
     failed_result = step_results.get(failed_step_id, {})
     failure_signature = (feedback_detail or {}).get("error", "")
+    current_stage = (
+        (feedback_detail or {}).get("stage")
+        or failed_step.get("adaptive_stage")
+        or failed_step.get("stage")
+        or client._infer_planning_stage(prompt)
+    )
 
     corrective_block = ""
     if forced_corrective:
@@ -670,6 +1113,9 @@ async def replan_from_step(
 
 User goal (must be satisfied semantically):
 {prompt}
+
+Current adaptive stage:
+{current_stage}
 
 Current scene state:
 {scene_to_prompt_text(scene, max_objects=20)}
@@ -702,8 +1148,9 @@ Instructions:
 4) Return valid plan JSON with a `steps` array.
 5) For newly created objects, use `$ref` from the creation step outputs in relationship/modify steps.
 6) Existing scene objects may be referenced by exact name only if they appear in Current scene state.
-7) If using create_beveled_box, always provide `name`, `size`, `location`, and explicit bevel parameters.
-8) Do not invent optional args that are not in the skill schema.
+7) Registered skill signatures are authoritative: use the exact skill name and only the parameters exposed by that skill's description/signature.
+8) If a modeling intent needs an unsupported parameter on the chosen skill, choose another registered skill that supports it or add a later registered transform/modify step.
+9) Do not invent optional args that are not in the skill schema.
 {client._modeling_quality_contract()}
 {corrective_block}
 """
@@ -712,6 +1159,7 @@ Instructions:
         replan_prompt,
         allowed_skills,
         min(140, max(30, int(os.getenv("VBF_REPLAN_SKILL_TOPK", "70")))),
+        stage=str(current_stage or "geometry_modeling"),
     )
     subset_candidates: List[List[str]] = [subset_small]
     if len(allowed_skills) > len(subset_small):
@@ -721,12 +1169,28 @@ Instructions:
     for subset in subset_candidates:
         raw_plan: Any = None
         raw_plan_snapshot: Any = None
+        plan: Optional[Dict[str, Any]] = None
         try:
-            raw_plan = await client._call_plan_with_format_retry(
-                adapter,
-                replan_prompt,
-                skills_subset=subset,
-            )
+            model_config = getattr(adapter, "_model_config", None)
+            old_tool_only_rounds = None
+            if isinstance(model_config, dict):
+                old_tool_only_rounds = model_config.get("max_consecutive_tool_only_rounds")
+                model_config["max_consecutive_tool_only_rounds"] = min(
+                    2,
+                    int(old_tool_only_rounds or 2),
+                )
+            try:
+                raw_plan = await client._call_plan_with_format_retry(
+                    adapter,
+                    replan_prompt,
+                    skills_subset=subset,
+                )
+            finally:
+                if isinstance(model_config, dict):
+                    if old_tool_only_rounds is None:
+                        model_config.pop("max_consecutive_tool_only_rounds", None)
+                    else:
+                        model_config["max_consecutive_tool_only_rounds"] = old_tool_only_rounds
             raw_plan_snapshot = client._snapshot_payload(raw_plan)
             client._record_pre_normalize_plan_snapshot(raw_plan_snapshot, stage="feedback_replan")
             plan = normalize_plan(raw_plan)
@@ -734,13 +1198,31 @@ Instructions:
             return plan, new_steps
         except ValueError as e:
             last_error = e
+            capability_text = ""
+            if plan is not None and "plan_gate_" in str(e):
+                capability_resolution = resolve_skill_capability_issue(
+                    adapter=adapter,
+                    allowed_skills=subset,
+                    plan=plan,
+                    error_message=str(e),
+                )
+                capability_text = format_skill_capability_resolution(capability_resolution)
+                if capability_text:
+                    print(
+                        "[VBF] skill_capability_resolution "
+                        f"classification={capability_resolution.get('classification')} "
+                        "stage=feedback_replan",
+                        flush=True,
+                    )
             client._record_plan_shape_failure(
-                str(e),
+                f"{e}\n\n{capability_text}" if capability_text else str(e),
                 raw_plan_snapshot if raw_plan_snapshot is not None else raw_plan,
                 stage="feedback_replan",
             )
             if not client._is_recoverable_plan_error(str(e)):
                 raise
+            if capability_text and capability_text not in replan_prompt:
+                replan_prompt = f"{replan_prompt}\n\n{capability_text}\n"
             continue
 
     if last_error is not None:

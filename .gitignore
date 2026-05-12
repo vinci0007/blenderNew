@@ -82,3 +82,5 @@ docs/to_do_plan.md
 /.pytest_tmp_run
 tests/test_addon_self_check.py
 /tests/task_tmp
+docs/archived/session_snapshot_2026-04-28_release_planning.md
+/.claude

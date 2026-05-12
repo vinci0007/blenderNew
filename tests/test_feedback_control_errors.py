@@ -12,6 +12,14 @@ class _FailingClient:
         raise JsonRpcError(code=-32000, message="Skill execution failed")
 
 
+class _TimeoutClient:
+    def _get_execute_skill_timeout_seconds(self):
+        return 1.5
+
+    async def execute_skill(self, skill, args, step_id=None):
+        raise TimeoutError("JSON-RPC call timed out")
+
+
 class _DummyCapture:
     def __init__(self):
         self._cache = {}
@@ -73,6 +81,31 @@ async def test_execute_with_feedback_converts_jsonrpc_error_to_replan():
     assert decision.detail.get("reason") == "execute_skill_failed"
     assert "002" in step_results
     assert step_results["002"]["ok"] is False
+    assert post_state is None
+
+
+@pytest.mark.asyncio
+async def test_execute_with_feedback_converts_timeout_to_checkpoint():
+    loop = ClosedLoopControl(
+        client=_TimeoutClient(),
+        enable_auto_check=True,
+        enable_llm_feedback=False,
+    )
+    step_results = {}
+    step = {
+        "step_id": "001",
+        "stage": "primitive_blocking",
+        "skill": "create_primitive",
+        "args": {"primitive_type": "cube", "name": "Root"},
+    }
+
+    decision, post_state = await loop.execute_with_feedback(step, step_results, _DummyCapture())
+
+    assert decision.action == "checkpoint"
+    assert decision.detail.get("reason") == "execute_skill_timeout"
+    assert decision.detail.get("timeout_s") == 1.5
+    assert step_results["001"]["ok"] is False
+    assert step_results["001"]["error"]["type"] == "TimeoutError"
     assert post_state is None
 
 

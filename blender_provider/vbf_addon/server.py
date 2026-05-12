@@ -4,6 +4,7 @@ import asyncio
 import copy
 import inspect
 import json
+import os
 import queue
 import socket
 import threading
@@ -160,6 +161,9 @@ class _Job:
     req: Dict[str, Any]
     fut: asyncio.Future
     ws_id: str
+    websocket: Any = None
+    enqueued_monotonic: float = 0.0
+    queue_deadline_monotonic: Optional[float] = None
 
 class VBFWebSocketServer:
     def __init__(self, host: str, port: int, poll_interval_s: float = 0.1):
@@ -173,6 +177,17 @@ class VBFWebSocketServer:
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Any = None
+        self._connections: set = set()
+        self._connection_ids: set[str] = set()
+        self._started_at: Optional[float] = None
+        self._last_poll_monotonic: Optional[float] = None
+        self._poll_count = 0
+        self._executed_jobs = 0
+        self._skipped_jobs = 0
+        self._executor_recovery_count = 0
+        self._last_executor_recovery: Optional[Dict[str, Any]] = None
+        self._current_job: Optional[Dict[str, Any]] = None
+        self._last_job: Optional[Dict[str, Any]] = None
 
         # Track undo stack depth for each step_id to support physical rollbacks
         # Mapping: step_id -> undo_stack_index
@@ -199,8 +214,89 @@ class VBFWebSocketServer:
     def running(self) -> bool:
         return self._running
 
+    def executor_status(self, auto_recover: bool = True) -> Dict[str, Any]:
+        """Return lightweight runtime health for UI/preflight diagnostics."""
+        if auto_recover:
+            self._recover_stale_executor_if_safe(reason="executor_status")
+        now = time.monotonic()
+        thread_alive = bool(self._thread and self._thread.is_alive())
+        loop_alive = bool(self._loop and self._loop.is_running())
+        last_poll_age = (
+            round(now - self._last_poll_monotonic, 3)
+            if self._last_poll_monotonic is not None
+            else None
+        )
+        current_job = copy.deepcopy(self._current_job) if self._current_job else None
+        if current_job and current_job.get("started_monotonic") is not None:
+            try:
+                current_job["running_s"] = round(now - float(current_job["started_monotonic"]), 3)
+            except Exception:
+                current_job["running_s"] = None
+            current_job.pop("started_monotonic", None)
+        last_job = copy.deepcopy(self._last_job) if self._last_job else None
+        poll_stale = (
+            bool(self._running)
+            and self._incoming.qsize() > 0
+            and self._current_job is None
+            and last_poll_age is not None
+            and last_poll_age > self._executor_stale_poll_threshold_s()
+        )
+        return {
+            "running": bool(self._running),
+            "thread_alive": thread_alive,
+            "loop_alive": loop_alive,
+            "server_bound": bool(self._server is not None and loop_alive),
+            "connections": len(self._connections),
+            "queue_size": self._incoming.qsize(),
+            "last_poll_age_s": last_poll_age,
+            "poll_stale": poll_stale,
+            "poll_count": self._poll_count,
+            "executed_jobs": self._executed_jobs,
+            "skipped_jobs": self._skipped_jobs,
+            "executor_recovery_count": self._executor_recovery_count,
+            "last_executor_recovery": copy.deepcopy(self._last_executor_recovery),
+            "current_job": current_job,
+            "last_job": last_job,
+            "bind": f"{self.host}:{self.port}",
+            "timer_registered": _is_poll_timer_registered(),
+        }
+
+    def _executor_stale_poll_threshold_s(self) -> float:
+        try:
+            return max(1.0, float(os.getenv("VBF_EXECUTOR_STALE_POLL_SECONDS", "5.0")))
+        except Exception:
+            return 5.0
+
+    def _recover_stale_executor_if_safe(self, reason: str = "watchdog") -> bool:
+        if not self._running or self._current_job is not None or self._incoming.qsize() <= 0:
+            return False
+        if self._last_poll_monotonic is None:
+            stale = True
+            age_s = None
+        else:
+            age_s = time.monotonic() - self._last_poll_monotonic
+            stale = age_s > self._executor_stale_poll_threshold_s()
+        if not stale:
+            return False
+
+        ok = _restart_poll_timer()
+        self._executor_recovery_count += 1
+        self._last_executor_recovery = {
+            "reason": reason,
+            "ok": bool(ok),
+            "queue_size": self._incoming.qsize(),
+            "last_poll_age_s": round(age_s, 3) if age_s is not None else None,
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return bool(ok)
+
+    def recover_executor(self, reason: str = "rpc") -> Dict[str, Any]:
+        recovered = self._recover_stale_executor_if_safe(reason=reason)
+        return {"recovered": recovered, "status": self.executor_status(auto_recover=False)}
+
     def start(self) -> None:
         if self._running:
+            _ensure_poll_timer()
             return
         if websockets is None:
             raise ImportError("Addon requires Python package `websockets` in Blender's Python environment.")
@@ -209,27 +305,167 @@ class VBFWebSocketServer:
         self._register_depsgraph_handlers()
 
         self._running = True
+        self._started_at = time.monotonic()
+        self._last_poll_monotonic = None
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
+        _ensure_poll_timer()
 
     def stop(self) -> None:
         """
-        Best-effort stop.
-        Notes:
-        - Websockets server runs in its own asyncio loop/thread.
-        - We stop the loop, which stops accepting new connections.
+        Stop the WebSocket server and release the bound port.
+
+        The server socket lives in a background asyncio loop. Closing the loop
+        without first closing the asyncio server can leave the TCP port bound,
+        so we schedule an orderly shutdown and wait briefly for the thread.
         """
-        if not self._running:
-            return
         self._running = False
+        _unregister_poll_timer()
         self._unregister_depsgraph_handlers()
-        if self._loop:
+        self._fail_queued_jobs("VBF server stopped")
+
+        loop = self._loop
+        if loop and loop.is_running():
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                fut = asyncio.run_coroutine_threadsafe(self._shutdown_async(), loop)
+                fut.result(timeout=3.0)
+            except Exception:
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except Exception:
+                    pass
+
+        thread = self._thread
+        if thread and thread.is_alive():
+            try:
+                thread.join(timeout=3.0)
             except Exception:
                 pass
-        self._loop = None
+        if not (thread and thread.is_alive()):
+            self._thread = None
+            self._loop = None
+            self._server = None
+            self._connections.clear()
+
+    def _fail_queued_jobs(self, message: str) -> None:
+        loop = self._loop
+        while True:
+            try:
+                job = self._incoming.get_nowait()
+            except queue.Empty:
+                break
+            resp = {
+                "jsonrpc": "2.0",
+                "id": job.req.get("id"),
+                "error": {"code": -32000, "message": message},
+            }
+            try:
+                if loop and loop.is_running():
+                    loop.call_soon_threadsafe(job.fut.set_result, resp)
+                elif not job.fut.done():
+                    job.fut.set_result(resp)
+            except Exception:
+                pass
+
+    async def _shutdown_async(self) -> None:
+        server = self._server
         self._server = None
+        if server is not None:
+            try:
+                server.close()
+                await server.wait_closed()
+            except Exception:
+                pass
+        for websocket in list(self._connections):
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        self._connections.clear()
+        self._connection_ids.clear()
+        loop = self._loop
+        if loop and loop.is_running():
+            loop.call_soon(loop.stop)
+
+    def _make_job(
+        self,
+        *,
+        req: Dict[str, Any],
+        fut: asyncio.Future,
+        ws_id: str,
+        websocket: Any,
+    ) -> _Job:
+        params = req.get("params") if isinstance(req.get("params"), dict) else {}
+        queue_timeout_s: Optional[float] = None
+        raw_timeout = params.get("_vbf_queue_timeout_s") if isinstance(params, dict) else None
+        if raw_timeout is not None:
+            try:
+                queue_timeout_s = max(1.0, float(raw_timeout))
+            except Exception:
+                queue_timeout_s = None
+        now = time.monotonic()
+        return _Job(
+            req=req,
+            fut=fut,
+            ws_id=ws_id,
+            websocket=websocket,
+            enqueued_monotonic=now,
+            queue_deadline_monotonic=(now + queue_timeout_s) if queue_timeout_s else None,
+        )
+
+    def _websocket_closed(self, websocket: Any) -> bool:
+        if websocket is None:
+            return False
+        closed = getattr(websocket, "closed", None)
+        if isinstance(closed, bool):
+            return closed
+        state = getattr(websocket, "state", None)
+        if state is not None:
+            text = str(state).upper()
+            if "CLOSED" in text or "CLOSING" in text:
+                return True
+            try:
+                # websockets.protocol.State.CLOSED == 3 in recent releases.
+                if int(state) >= 2:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _skip_queued_job_response(self, job: _Job) -> Optional[Dict[str, Any]]:
+        now = time.monotonic()
+        reason = None
+        if job.ws_id not in self._connection_ids or self._websocket_closed(job.websocket):
+            reason = "client_disconnected_before_execution"
+        elif job.queue_deadline_monotonic is not None and now > job.queue_deadline_monotonic:
+            reason = "queue_deadline_expired_before_execution"
+        if not reason:
+            return None
+
+        self._skipped_jobs += 1
+        req_id = job.req.get("id")
+        params = job.req.get("params") if isinstance(job.req.get("params"), dict) else {}
+        queued_s = round(now - (job.enqueued_monotonic or now), 3)
+        self._last_job = {
+            "method": job.req.get("method", "vbf.execute_skill"),
+            "skill": params.get("skill") if isinstance(params, dict) else None,
+            "step_id": params.get("step_id") if isinstance(params, dict) else None,
+            "request_id": req_id,
+            "duration_s": 0.0,
+            "queued_s": queued_s,
+            "ok": False,
+            "error": reason,
+            "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {
+                "code": -32098,
+                "message": f"Queued job skipped before execution: {reason}",
+                "data": {"reason": reason, "queued_s": queued_s},
+            },
+        }
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
@@ -238,76 +474,148 @@ class VBFWebSocketServer:
 
         async def handler(websocket):
             ws_id = str(id(websocket))
-            async for message in websocket:
-                try:
-                    req = json.loads(message)
-                except Exception:
-                    continue
+            self._connections.add(websocket)
+            self._connection_ids.add(ws_id)
+            try:
+                async for message in websocket:
+                    try:
+                        req = json.loads(message)
+                    except Exception:
+                        continue
 
-                req_id = req.get("id")
-                method = req.get("method")
-                params = req.get("params") or {}
+                    req_id = req.get("id")
+                    method = req.get("method")
+                    params = req.get("params") or {}
 
-                if method == "vbf.list_skills":
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {"ok": True, "data": {"skills": sorted(list(SKILL_REGISTRY.keys()))}},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if method == "vbf.describe_skills":
-                    skill_names = params.get("skill_names") if isinstance(params, dict) else None
-                    registry = SKILL_REGISTRY
-                    if skill_names and isinstance(skill_names, list):
-                        registry = {k: v for k, v in SKILL_REGISTRY.items() if k in skill_names}
-                    schemas = {name: _extract_skill_schema(fn) for name, fn in registry.items()}
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {"ok": True, "data": {"skills": schemas}},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if method == "vbf.get_capabilities":
-                    data = self._get_capabilities()
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {"ok": True, "data": data},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if method == "vbf.rollback_to_step":
-                    step_id = params.get("step_id") if isinstance(params, dict) else None
-                    if not step_id or not isinstance(step_id, str):
+                    if method == "vbf.list_skills":
                         resp = {
                             "jsonrpc": "2.0",
                             "id": req_id,
-                            "error": {"code": -32602, "message": "Invalid params: step_id must be a string"},
+                            "result": {"ok": True, "data": {"skills": sorted(list(SKILL_REGISTRY.keys()))}},
                         }
                         await websocket.send(json.dumps(resp))
                         continue
 
-                    # Rollback must be executed on the main thread via the job queue
-                    fut: asyncio.Future = loop.create_future()
-                    # Special job format for rollback
-                    self._incoming.put(_Job(req={"method": "vbf.rollback_to_step", "params": {"step_id": step_id}, "id": req_id}, fut=fut, ws_id=ws_id))
-                    try:
-                        result_payload = await fut
-                    except Exception:
-                        result_payload = {
+                    if method == "vbf.describe_skills":
+                        skill_names = params.get("skill_names") if isinstance(params, dict) else None
+                        registry = SKILL_REGISTRY
+                        if skill_names and isinstance(skill_names, list):
+                            registry = {k: v for k, v in SKILL_REGISTRY.items() if k in skill_names}
+                        schemas = {name: _extract_skill_schema(fn) for name, fn in registry.items()}
+                        resp = {
                             "jsonrpc": "2.0",
                             "id": req_id,
-                            "error": {"code": -32000, "message": "Internal server error during rollback"},
+                            "result": {"ok": True, "data": {"skills": schemas}},
                         }
-                    await websocket.send(json.dumps(result_payload))
-                    continue
+                        await websocket.send(json.dumps(resp))
+                        continue
 
-                if method == "vbf.get_scene_delta":
+                    if method == "vbf.get_capabilities":
+                        data = self._get_capabilities()
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"ok": True, "data": data},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    if method == "vbf.executor_status":
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"ok": True, "data": self.executor_status()},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    if method == "vbf.recover_executor":
+                        reason = params.get("reason", "rpc") if isinstance(params, dict) else "rpc"
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"ok": True, "data": self.recover_executor(str(reason))},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    if method == "vbf.rollback_to_step":
+                        step_id = params.get("step_id") if isinstance(params, dict) else None
+                        if not step_id or not isinstance(step_id, str):
+                            resp = {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32602, "message": "Invalid params: step_id must be a string"},
+                            }
+                            await websocket.send(json.dumps(resp))
+                            continue
+
+                        fut: asyncio.Future = loop.create_future()
+                        self._incoming.put(
+                            self._make_job(
+                                req={
+                                    "method": "vbf.rollback_to_step",
+                                    "params": {"step_id": step_id},
+                                    "id": req_id,
+                                },
+                                fut=fut,
+                                ws_id=ws_id,
+                                websocket=websocket,
+                            )
+                        )
+                        try:
+                            result_payload = await fut
+                        except Exception:
+                            result_payload = {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32000, "message": "Internal server error during rollback"},
+                            }
+                        await websocket.send(json.dumps(result_payload))
+                        continue
+
+                    if method == "vbf.get_scene_delta":
+                        if not isinstance(params, dict):
+                            resp = {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32602, "message": "Invalid params"},
+                            }
+                            await websocket.send(json.dumps(resp))
+                            continue
+                        since_seq = params.get("since_seq", 0)
+                        try:
+                            since_seq = int(since_seq)
+                        except Exception:
+                            since_seq = 0
+                        data = self._get_scene_delta(since_seq)
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"ok": True, "data": data},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    if method == "vbf.get_scene_snapshot":
+                        data = self._get_scene_snapshot()
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"ok": True, "data": data},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
+                    if method != "vbf.execute_skill":
+                        resp = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32601, "message": f"Method not found: {method}"},
+                        }
+                        await websocket.send(json.dumps(resp))
+                        continue
+
                     if not isinstance(params, dict):
                         resp = {
                             "jsonrpc": "2.0",
@@ -316,69 +624,61 @@ class VBFWebSocketServer:
                         }
                         await websocket.send(json.dumps(resp))
                         continue
-                    since_seq = params.get("since_seq", 0)
+
+                    fut: asyncio.Future = loop.create_future()
+                    self._incoming.put(
+                        self._make_job(req=req, fut=fut, ws_id=ws_id, websocket=websocket)
+                    )
                     try:
-                        since_seq = int(since_seq)
+                        result_payload = await fut
                     except Exception:
-                        since_seq = 0
-                    data = self._get_scene_delta(since_seq)
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {"ok": True, "data": data},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if method == "vbf.get_scene_snapshot":
-                    data = self._get_scene_snapshot()
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "result": {"ok": True, "data": data},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if method != "vbf.execute_skill":
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "error": {"code": -32601, "message": f"Method not found: {method}"},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                if not isinstance(params, dict):
-                    resp = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "error": {"code": -32602, "message": "Invalid params"},
-                    }
-                    await websocket.send(json.dumps(resp))
-                    continue
-
-                fut: asyncio.Future = loop.create_future()
-                self._incoming.put(_Job(req=req, fut=fut, ws_id=ws_id))
-                try:
-                    result_payload = await fut
-                except Exception:
-                    result_payload = {
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "error": {"code": -32000, "message": "Internal server error"},
-                    }
-                await websocket.send(json.dumps(result_payload))
+                        result_payload = {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32000, "message": "Internal server error"},
+                        }
+                    await websocket.send(json.dumps(result_payload))
+            finally:
+                self._connections.discard(websocket)
+                self._connection_ids.discard(ws_id)
 
         async def main() -> None:
             self._server = await websockets.serve(handler, self.host, self.port)
 
-        loop.run_until_complete(main())
-        loop.run_forever()
+        try:
+            loop.run_until_complete(main())
+            loop.run_forever()
+        finally:
+            try:
+                if self._server is not None:
+                    self._server.close()
+                    loop.run_until_complete(self._server.wait_closed())
+            except Exception:
+                pass
+            self._server = None
+            self._connections.clear()
+            self._connection_ids.clear()
+            try:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
+            if self._loop is loop:
+                self._loop = None
+            self._running = False
 
     def poll_once_and_execute(self) -> None:
         if not self._running or not self._loop:
             return
+        self._last_poll_monotonic = time.monotonic()
+        self._poll_count += 1
         loop = self._loop
 
         while True:
@@ -387,10 +687,36 @@ class VBFWebSocketServer:
             except queue.Empty:
                 break
 
+            skipped_resp = self._skip_queued_job_response(job)
+            if skipped_resp is not None:
+                if not job.fut.done():
+                    loop.call_soon_threadsafe(job.fut.set_result, skipped_resp)
+                continue
+
             req_id = job.req.get("id")
             method = job.req.get("method", "vbf.execute_skill") # Default to execute_skill
+            job_started = time.monotonic()
+            params = job.req.get("params") or {}
+            skill = None
+            step_id = None
+            if method == "vbf.execute_skill" and isinstance(params, dict):
+                skill = params.get("skill")
+                step_id = params.get("step_id")
+            elif method == "vbf.rollback_to_step" and isinstance(params, dict):
+                skill = "rollback_to_step"
+                step_id = params.get("step_id")
+            self._current_job = {
+                "method": method,
+                "skill": skill,
+                "step_id": step_id,
+                "request_id": req_id,
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "started_monotonic": job_started,
+            }
+            job_ok = False
+            job_error: Optional[str] = None
             try:
-                params = job.req.get("params") or {}
+                self._executed_jobs += 1
 
                 if method == "vbf.rollback_to_step":
                     step_id = params.get("step_id")
@@ -416,10 +742,14 @@ class VBFWebSocketServer:
                     self._step_undo_map = {sid: cnt for sid, cnt in self._step_undo_map.items() if cnt <= target_undo_count}
 
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": {"undone_steps": undo_diff}}}
+                    job_ok = True
                 else:
                     # Normal execute_skill path
                     skill = params.get("skill")
                     args = params.get("args") or {}
+                    if self._current_job is not None:
+                        self._current_job["skill"] = skill
+                        self._current_job["step_id"] = params.get("step_id")
 
                     if not isinstance(args, dict):
                         raise ValueError("params.args must be an object")
@@ -463,8 +793,10 @@ class VBFWebSocketServer:
                             data["_post_state"] = post_state
 
                     resp = {"jsonrpc": "2.0", "id": req_id, "result": {"ok": True, "data": data}}
+                    job_ok = True
 
             except ValueError as e:
+                job_error = str(e)
                 resp = {
                     "jsonrpc": "2.0",
                     "id": req_id,
@@ -475,6 +807,7 @@ class VBFWebSocketServer:
                     },
                 }
             except Exception as e:
+                job_error = str(e)
                 # Capture Blender context for better LLM recovery
                 context_snapshot = {
                     "active_object": getattr(bpy.context, "active_object", None).name if hasattr(bpy.context, "active_object") and bpy.context.active_object else None,
@@ -496,6 +829,19 @@ class VBFWebSocketServer:
                 }
 
             try:
+                duration_s = round(time.monotonic() - job_started, 3)
+                last_job = copy.deepcopy(self._current_job) if self._current_job else {}
+                last_job.pop("started_monotonic", None)
+                last_job.update(
+                    {
+                        "duration_s": duration_s,
+                        "ok": bool(job_ok),
+                        "error": job_error,
+                        "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+                self._last_job = last_job
+                self._current_job = None
                 if not job.fut.done():
                     loop.call_soon_threadsafe(job.fut.set_result, resp)
             except Exception:
@@ -660,6 +1006,7 @@ class VBFWebSocketServer:
                 "scene_delta": True,
                 "scene_snapshot": True,
                 "closed_loop_events": True,
+                "executor_status": True,
             },
             "limits": {
                 "scene_events_max": int(self._scene_events_max),
@@ -667,11 +1014,13 @@ class VBFWebSocketServer:
             },
             "runtime": {
                 "depsgraph_handlers_registered": bool(self._depsgraph_pre_handler and self._depsgraph_post_handler),
+                "executor": self.executor_status(),
             },
             "methods": [
                 "vbf.list_skills",
                 "vbf.describe_skills",
                 "vbf.get_capabilities",
+                "vbf.executor_status",
                 "vbf.get_scene_delta",
                 "vbf.get_scene_snapshot",
                 "vbf.rollback_to_step",
@@ -681,6 +1030,53 @@ class VBFWebSocketServer:
 
 _SERVER: Optional[VBFWebSocketServer] = None
 _LAST_SELF_CHECK: Optional[Dict[str, Any]] = None
+_POLL_TIMER_REGISTERED = False
+_SERVER_REGISTRY_KEY = "vbf_addon_server_instances"
+_POLL_TIMER_REGISTRY_KEY = "vbf_addon_poll_timer_functions"
+
+
+def _driver_registry_list(key: str) -> List[Any]:
+    try:
+        registry = bpy.app.driver_namespace.get(key)
+        if not isinstance(registry, list):
+            registry = []
+            bpy.app.driver_namespace[key] = registry
+        return registry
+    except Exception:
+        return []
+
+
+def _register_server_instance(server: VBFWebSocketServer) -> None:
+    registry = _driver_registry_list(_SERVER_REGISTRY_KEY)
+    if not any(item is server for item in registry):
+        registry.append(server)
+
+
+def _known_server_instances() -> List[VBFWebSocketServer]:
+    servers: List[VBFWebSocketServer] = []
+    seen: set[int] = set()
+    for candidate in [_SERVER, *_driver_registry_list(_SERVER_REGISTRY_KEY)]:
+        if candidate is None:
+            continue
+        ident = id(candidate)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        servers.append(candidate)
+    return servers
+
+
+def _cleanup_server_registry() -> None:
+    registry = _driver_registry_list(_SERVER_REGISTRY_KEY)
+    alive = []
+    for server in registry:
+        try:
+            status = server.executor_status()
+            if status.get("running") or status.get("thread_alive") or status.get("server_bound"):
+                alive.append(server)
+        except Exception:
+            pass
+    registry[:] = alive
 
 def _read_bind_from_preferences(default_host: str, default_port: int) -> tuple[str, int]:
     """Read bind host/port from addon preferences with safe defaults."""
@@ -722,6 +1118,7 @@ def get_server() -> VBFWebSocketServer:
         host, port = _read_bind_from_preferences(host, port)
 
         _SERVER = VBFWebSocketServer(host=host, port=port)
+        _register_server_instance(_SERVER)
     return _SERVER
 
 def _normalize_probe_host(host: str) -> str:
@@ -829,6 +1226,48 @@ def run_self_check() -> Dict[str, Any]:
         "message": f"Skill registry size: {skill_count}",
     })
 
+    has_executor_status = hasattr(server, "executor_status")
+    executor = (
+        server.executor_status()
+        if has_executor_status
+        else {
+            "running": bool(getattr(server, "running", False)),
+            "thread_alive": bool(getattr(server, "_thread", None)),
+            "loop_alive": bool(getattr(server, "_loop", None)),
+            "server_bound": bool(getattr(server, "_server", None)),
+            "queue_size": None,
+            "last_poll_age_s": None,
+            "executed_jobs": None,
+            "timer_registered": _is_poll_timer_registered(),
+        }
+    )
+    checks.append({
+        "name": "executor_poll_timer",
+        "ok": bool(executor.get("timer_registered")) if has_executor_status else True,
+        "message": (
+            "App timer registered"
+            if executor.get("timer_registered")
+            else ("Executor status unavailable" if not has_executor_status else "App timer not registered")
+        ),
+    })
+    executor_ok = True
+    if has_executor_status:
+        executor_ok = (
+            bool(executor.get("running"))
+            and bool(executor.get("thread_alive"))
+            and bool(executor.get("loop_alive"))
+            and bool(executor.get("server_bound"))
+        )
+    checks.append({
+        "name": "executor_runtime",
+        "ok": executor_ok,
+        "message": (
+            f"queue={executor.get('queue_size')}, "
+            f"last_poll_age_s={executor.get('last_poll_age_s')}, "
+            f"executed_jobs={executor.get('executed_jobs')}"
+        ),
+    })
+
     capabilities: Dict[str, Any] = {}
     try:
         capabilities = ws_capabilities or (
@@ -849,6 +1288,7 @@ def run_self_check() -> Dict[str, Any]:
         f"running={'yes' if server.running else 'no'}, "
         f"tcp={'yes' if tcp_ok else 'no'}, "
         f"ws={'yes' if ws_ok else 'no'}, "
+        f"timer={'yes' if executor.get('timer_registered') else 'no'}, "
         f"skills={skill_count}"
     )
     result = {
@@ -882,6 +1322,8 @@ class VBF_OT_serve(bpy.types.Operator):
             server.start()
             if bind_changed:
                 self.report({"INFO"}, f"VBF bind updated to {server.host}:{server.port}")
+        else:
+            _ensure_poll_timer()
 
         wm = getattr(context, "window_manager", None)
         if wm:
@@ -889,7 +1331,7 @@ class VBF_OT_serve(bpy.types.Operator):
             wm.modal_handler_add(self)
             return {"RUNNING_MODAL"}
 
-        bpy.app.timers.register(_headless_poll, first_interval=0.1)
+        _ensure_poll_timer()
         return {"FINISHED"}
 
     def modal(self, context, event):
@@ -905,18 +1347,141 @@ class VBF_OT_serve(bpy.types.Operator):
             pass
 
 def _headless_poll():
+    global _POLL_TIMER_REGISTERED
     try:
-        get_server().poll_once_and_execute()
+        server = get_server()
+        if not server.running:
+            _POLL_TIMER_REGISTERED = False
+            return None
+        server.poll_once_and_execute()
     except Exception:
         pass
     return 0.1
+
+def _is_poll_timer_registered() -> bool:
+    if _POLL_TIMER_REGISTERED:
+        return True
+    for fn in _driver_registry_list(_POLL_TIMER_REGISTRY_KEY):
+        try:
+            if bpy.app.timers.is_registered(fn):
+                return True
+        except Exception:
+            pass
+    return False
+
+def _ensure_poll_timer() -> None:
+    global _POLL_TIMER_REGISTERED
+    try:
+        timers = _driver_registry_list(_POLL_TIMER_REGISTRY_KEY)
+        if not any(fn is _headless_poll for fn in timers):
+            timers.append(_headless_poll)
+        if not bpy.app.timers.is_registered(_headless_poll):
+            bpy.app.timers.register(_headless_poll, first_interval=0.1)
+        _POLL_TIMER_REGISTERED = True
+    except Exception:
+        pass
+
+def _restart_poll_timer() -> bool:
+    global _POLL_TIMER_REGISTERED
+    try:
+        if bpy.app.timers.is_registered(_headless_poll):
+            bpy.app.timers.unregister(_headless_poll)
+    except Exception:
+        pass
+    try:
+        timers = _driver_registry_list(_POLL_TIMER_REGISTRY_KEY)
+        if not any(fn is _headless_poll for fn in timers):
+            timers.append(_headless_poll)
+        bpy.app.timers.register(_headless_poll, first_interval=0.1)
+        _POLL_TIMER_REGISTERED = True
+        return True
+    except Exception:
+        _POLL_TIMER_REGISTERED = _is_poll_timer_registered()
+        return False
+
+def _unregister_poll_timer() -> None:
+    global _POLL_TIMER_REGISTERED
+    timers = _driver_registry_list(_POLL_TIMER_REGISTRY_KEY)
+    try:
+        if bpy.app.timers.is_registered(_headless_poll):
+            bpy.app.timers.unregister(_headless_poll)
+    except Exception:
+        pass
+    for fn in list(timers):
+        try:
+            if bpy.app.timers.is_registered(fn):
+                bpy.app.timers.unregister(fn)
+        except Exception:
+            pass
+    timers[:] = []
+    _POLL_TIMER_REGISTERED = False
 
 def start_vbf_ws_server() -> None:
     server = get_server()
     _sync_server_bind_from_preferences(server)
     if not server.running:
         server.start()
-    bpy.app.timers.register(_headless_poll, first_interval=0.1)
+    _ensure_poll_timer()
+
+
+def stop_all_plugin_servers() -> Dict[str, Any]:
+    """Stop every VBF server instance known to this Blender session.
+
+    This is intentionally broader than get_server().stop(): after addon reloads,
+    an older module instance can still own a WebSocket server and keep the port
+    bound even though the current UI shows STOPPED.
+    """
+    global _SERVER
+    stopped = 0
+    still_bound: List[str] = []
+    errors: List[str] = []
+    ports: List[tuple[str, int]] = []
+
+    for server in _known_server_instances():
+        try:
+            host = getattr(server, "host", "127.0.0.1")
+            port = int(getattr(server, "port", 0))
+            if port:
+                ports.append((host, port))
+            status_before = server.executor_status() if hasattr(server, "executor_status") else {}
+            was_active = bool(
+                status_before.get("running")
+                or status_before.get("thread_alive")
+                or status_before.get("server_bound")
+            )
+            server.stop()
+            status_after = server.executor_status() if hasattr(server, "executor_status") else {}
+            is_active = bool(
+                status_after.get("running")
+                or status_after.get("thread_alive")
+                or status_after.get("server_bound")
+            )
+            if was_active or not is_active:
+                stopped += 1
+        except Exception as e:
+            errors.append(str(e))
+
+    _unregister_poll_timer()
+    _cleanup_server_registry()
+    _SERVER = None
+
+    seen_ports: set[tuple[str, int]] = set()
+    for host, port in ports:
+        key = (_normalize_probe_host(host), int(port))
+        if key in seen_ports:
+            continue
+        seen_ports.add(key)
+        tcp_ok, _message = _tcp_probe(host, port, timeout_s=0.25)
+        if tcp_ok:
+            still_bound.append(f"{key[0]}:{key[1]}")
+
+    return {
+        "stopped": stopped,
+        "known_servers": len(ports),
+        "still_bound": still_bound,
+        "errors": errors,
+        "ok": not still_bound and not errors,
+    }
 
 class VBF_OT_stop(bpy.types.Operator):
     bl_idname = "vbf.stop"
@@ -924,9 +1489,19 @@ class VBF_OT_stop(bpy.types.Operator):
 
     def execute(self, context):
         try:
-            get_server().stop()
-        except Exception:
-            pass
+            result = stop_all_plugin_servers()
+            if result.get("still_bound"):
+                self.report(
+                    {"WARNING"},
+                    "[VBF] Stop requested; plugin port still bound: "
+                    + ", ".join(result.get("still_bound") or []),
+                )
+            elif result.get("errors"):
+                self.report({"WARNING"}, f"[VBF] Stop completed with errors: {result.get('errors')}")
+            else:
+                self.report({"INFO"}, f"[VBF] Server stopped; released {result.get('stopped', 0)} instance(s)")
+        except Exception as e:
+            self.report({"ERROR"}, f"[VBF] Stop failed: {e}")
         return {"FINISHED"}
 
 class VBF_OT_self_check(bpy.types.Operator):

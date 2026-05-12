@@ -100,6 +100,38 @@ class TestRateLimiter:
         assert stats["total_calls"] == 0
         assert stats["throttled_calls"] == 0
 
+    @pytest.mark.asyncio
+    async def test_execute_can_disable_outer_hard_timeout(self):
+        config = LLM_API_Throttle_Config(
+            call_timeout_seconds=0.01,
+            retry_on_failure={"max_attempts": 0, "delay_between_attempts_seconds": 0.0},
+        )
+        limiter = RateLimiter(config)
+
+        async def slow_success():
+            await asyncio.sleep(0.03)
+            return "ok"
+
+        assert await limiter.execute_with_throttle(
+            slow_success,
+            hard_timeout=False,
+        ) == "ok"
+
+    @pytest.mark.asyncio
+    async def test_execute_hard_timeout_still_available(self):
+        config = LLM_API_Throttle_Config(
+            call_timeout_seconds=0.01,
+            retry_on_failure={"max_attempts": 0, "delay_between_attempts_seconds": 0.0},
+        )
+        limiter = RateLimiter(config)
+
+        async def slow_success():
+            await asyncio.sleep(0.03)
+            return "ok"
+
+        with pytest.raises(TimeoutError):
+            await limiter.execute_with_throttle(slow_success)
+
 
 def test_load_throttle_config_from_nested_llm_section(monkeypatch):
     cfg = _workspace_config_path()

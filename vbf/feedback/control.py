@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -124,6 +125,26 @@ class ClosedLoopControl:
             if isinstance(value, str) and value:
                 return value
         return None
+
+    @staticmethod
+    def _summarize_args(args: Dict[str, Any], max_chars: int = 500) -> str:
+        try:
+            text = json.dumps(args, ensure_ascii=False, default=str, sort_keys=True)
+        except Exception:
+            text = str(args)
+        text = " ".join(text.split())
+        if len(text) > max_chars:
+            return text[: max_chars - 3] + "..."
+        return text
+
+    def _execute_skill_timeout_seconds(self) -> float:
+        getter = getattr(self.client, "_get_execute_skill_timeout_seconds", None)
+        if callable(getter):
+            try:
+                return float(getter())
+            except Exception:
+                pass
+        return 60.0
 
     @staticmethod
     def _analysis_stage_for_step(step: Dict[str, Any]) -> str:
@@ -250,8 +271,39 @@ class ClosedLoopControl:
         )
 
         # Execute skill
+        timeout_s = self._execute_skill_timeout_seconds()
+        print(
+            "[VBF-Exec] step_start "
+            f"step_id={step_id} "
+            f"skill={skill} "
+            f"timeout={timeout_s:.1f}s "
+            f"args={self._summarize_args(resolved_args)}",
+            flush=True,
+        )
         try:
             result = await self.client.execute_skill(skill, resolved_args, step_id)
+        except TimeoutError as e:
+            error_msg = f"Skill execution timed out after {timeout_s:.1f}s"
+            validation = ValidationResult.failed(skill, error_msg)
+            self._failed_steps.append((step_id, validation))
+            step_results[step_id] = {
+                "ok": False,
+                "error": {
+                    "message": error_msg,
+                    "type": "TimeoutError",
+                },
+            }
+            return FeedbackDecision(
+                action="checkpoint",
+                detail={
+                    "step_id": step_id,
+                    "skill": skill,
+                    "error": str(e) or error_msg,
+                    "reason": "execute_skill_timeout",
+                    "timeout_s": timeout_s,
+                },
+                validation=validation,
+            ), None
         except JsonRpcError as e:
             validation = ValidationResult.failed(skill, f"Execution failed: {e}")
             self._failed_steps.append((step_id, validation))

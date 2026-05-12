@@ -3,6 +3,7 @@
 This module handles the normalization of LLM-generated plan structures
 to match the expected VBF plan schema, including:
 - Field name normalization (params/parameters -> args)
+- Skill name canonicalization (create_cylinder -> create_primitive)
 - Parameter alias resolution (type -> primitive_type)
 - on_success structure completion
 """
@@ -16,9 +17,13 @@ PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
     "create_primitive": {
         "type": "primitive_type",  # LLM commonly uses 'type', actual is 'primitive_type'
         "primitive": "primitive_type",  # Some models output 'primitive'
+        "object_name": "name",
+        "dimensions": "size",
         "rotation": "rotation_euler",  # Blender primitive helper expects rotation_euler
+        "depth": "height",  # Blender/OpenAI examples often use depth for cylinder height
     },
     "create_beveled_box": {
+        "object_name": "name",
         "dimensions": "size",
         "position": "location",
     },
@@ -36,6 +41,33 @@ PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
 # Skills/tools that are for planning-time documentation query, not Blender execution.
 NON_EXECUTION_SKILLS: Set[str] = {
     "load_skill",
+}
+
+PRIMITIVE_SKILL_ALIASES: Dict[str, str] = {
+    "create_box": "cube",
+    "create_cube": "cube",
+    "create_cuboid": "cube",
+    "create_cylinder": "cylinder",
+    "create_cone": "cone",
+    "create_sphere": "sphere",
+    "create_uv_sphere": "sphere",
+    "create_ico_sphere": "sphere",
+}
+
+SUPPORTED_CREATE_PRIMITIVE_TYPES: Set[str] = {"cube", "cylinder", "cone", "sphere"}
+
+CREATE_PRIMITIVE_TYPE_ALIASES: Dict[str, str] = {
+    "box": "cube",
+    "cuboid": "cube",
+    "uv_sphere": "sphere",
+    "ico_sphere": "sphere",
+    # Blender has a torus primitive, but the registered VBF create_primitive
+    # skill intentionally exposes only cube/cylinder/cone/sphere. A cylinder is
+    # the safest executable approximation for wheel/tire/ring requests.
+    "torus": "cylinder",
+    "donut": "cylinder",
+    "doughnut": "cylinder",
+    "ring": "cylinder",
 }
 
 
@@ -250,13 +282,19 @@ def apply_parameter_aliases(skill_name: str, args: Dict[str, Any]) -> None:
         primitive_type = args.get("primitive_type")
         if isinstance(primitive_type, str):
             normalized = primitive_type.strip().lower().replace("-", "_").replace(" ", "_")
-            primitive_aliases = {
-                "box": "cube",
-                "cuboid": "cube",
-                "uv_sphere": "sphere",
-                "ico_sphere": "sphere",
-            }
-            args["primitive_type"] = primitive_aliases.get(normalized, normalized)
+            args["primitive_type"] = CREATE_PRIMITIVE_TYPE_ALIASES.get(normalized, normalized)
+        size = args.get("size")
+        if isinstance(size, (int, float)) and not isinstance(size, bool):
+            value = float(size)
+            primitive_key = str(args.get("primitive_type") or "cube").strip().lower()
+            if primitive_key in {"cube", "box", "cuboid"}:
+                args["size"] = [value, value, value]
+            else:
+                args["size"] = [value]
+        # The registered create_primitive skill does not expose mesh segment
+        # counts. Preserve executable dimensions and drop common generator-only
+        # mesh-detail hints before plan gate sees them as unknown args.
+        args.pop("vertices", None)
 
     if skill_name == "create_beveled_box" and "size" not in args:
         if all(name in args for name in ("width", "height", "depth")):
@@ -266,6 +304,30 @@ def apply_parameter_aliases(skill_name: str, args: Dict[str, Any]) -> None:
         operation = args.get("operation")
         if isinstance(operation, str):
             args["operation"] = operation.lower()
+
+
+def canonicalize_step_skill(step: Dict[str, Any]) -> None:
+    """Map common semantic skill shorthands to registered executable skills."""
+    skill_name = step.get("skill")
+    if not isinstance(skill_name, str):
+        return
+
+    normalized_skill = skill_name.strip().lower().replace("-", "_").replace(" ", "_")
+    args = step.get("args")
+    if not isinstance(args, dict):
+        args = {}
+        step["args"] = args
+
+    primitive_type = PRIMITIVE_SKILL_ALIASES.get(normalized_skill)
+    if primitive_type:
+        step["skill"] = "create_primitive"
+        args.setdefault("primitive_type", primitive_type)
+        if "depth" in args and "height" not in args:
+            args["height"] = args.pop("depth")
+        return
+
+    if normalized_skill != skill_name:
+        step["skill"] = normalized_skill
 
 
 def ensure_on_success_structure(on_success: Dict[str, Any]) -> None:
@@ -319,6 +381,10 @@ def normalize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
 
         # Normalize field names
         normalize_step_field_names(step)
+
+        # Canonicalize semantic skill shorthands before validating against
+        # the registered Blender skill list.
+        canonicalize_step_skill(step)
 
         # Apply parameter aliases
         skill_name = step.get("skill")

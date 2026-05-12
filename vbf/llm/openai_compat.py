@@ -16,6 +16,34 @@ class LLMError(RuntimeError):
 
 
 _RESERVED_REQUEST_HEADERS = {"authorization", "content-type", "host"}
+_SUPPORTED_AUTH_SCHEMES = {"auto", "bearer", "x-api-key"}
+
+
+def _normalize_auth_scheme(raw_value: Any, default: str = "auto") -> str:
+    """Normalize configured API-key authentication header style."""
+    normalized_default = default if default in _SUPPORTED_AUTH_SCHEMES else "auto"
+    if raw_value is None:
+        return normalized_default
+
+    value = str(raw_value).strip().lower().replace("_", "-")
+    aliases = {
+        "authorization": "bearer",
+        "authorization-bearer": "bearer",
+        "bearer-token": "bearer",
+        "api-key": "x-api-key",
+        "apikey": "x-api-key",
+        "x-api-key": "x-api-key",
+    }
+    value = aliases.get(value, value)
+    if value in _SUPPORTED_AUTH_SCHEMES:
+        return value
+
+    logging.warning(
+        "vbf config llm section: field 'auth_scheme' has unsupported value %r, using default %s",
+        raw_value,
+        normalized_default,
+    )
+    return normalized_default
 
 
 def _extract_first_json_object(text: str) -> Dict[str, Any]:
@@ -85,11 +113,11 @@ def _sanitize_request_headers(raw_headers: Any) -> Dict[str, str]:
 def _resolve_request_headers(
     raw_headers: Any,
     *,
-    is_proxy_api: bool,
+    enable_proxy_compatibility_mode: bool,
     enable_extra_request_headers: bool,
 ) -> Dict[str, str]:
     """Return effective extra headers based on proxy/header feature flags."""
-    if not is_proxy_api or not enable_extra_request_headers:
+    if not enable_proxy_compatibility_mode or not enable_extra_request_headers:
         return {}
     return _sanitize_request_headers(raw_headers)
 
@@ -130,12 +158,15 @@ class OpenAICompatConfig:
     api_key: str
     model: str
     temperature: float = 0.2
+    api_protocol: str = "openai_responses"
+    auth_scheme: str = "auto"
     chat_completions_path: str = "/v1/chat/completions"
+    responses_path: str = "/v1/responses"
     use_response_format_json_object: bool = True
     use_llm: bool = True
     allow_low_level_gateway: bool = False
     auto_allow_low_level_gateway: bool = True
-    is_proxy_api: bool = False
+    enable_proxy_compatibility_mode: bool = False
     enable_extra_request_headers: bool = False
     use_curl_http_compat: bool = False
     http_timeout_seconds: float = 60.0
@@ -160,12 +191,17 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
             api_key=api_key,
             model=model,
             temperature=float(os.getenv("VBF_LLM_TEMPERATURE", "0.2")),
+            api_protocol=os.getenv("VBF_LLM_API_PROTOCOL", "openai_responses"),
+            auth_scheme=_normalize_auth_scheme(os.getenv("VBF_LLM_AUTH_SCHEME", "auto")),
             chat_completions_path=os.getenv("VBF_LLM_CHAT_COMPLETIONS_PATH", "/v1/chat/completions"),
+            responses_path=os.getenv("VBF_LLM_RESPONSES_PATH", "/v1/responses"),
             use_response_format_json_object=os.getenv("VBF_LLM_JSON_OBJECT", "1") != "0",
             use_llm=os.getenv("VBF_LLM_ENABLED", "1") != "0",
             allow_low_level_gateway=os.getenv("VBF_ALLOW_LOW_LEVEL_GATEWAY", "0") == "1",
             auto_allow_low_level_gateway=os.getenv("VBF_AUTO_ALLOW_LOW_LEVEL_GATEWAY", "1") == "1",
-            is_proxy_api=False,
+            enable_proxy_compatibility_mode=os.getenv(
+                "VBF_LLM_ENABLE_PROXY_COMPATIBILITY_MODE", "0"
+            ) == "1",
             enable_extra_request_headers=False,
             use_curl_http_compat=os.getenv("VBF_USE_CURL_HTTP_COMPAT", "0") == "1",
             http_timeout_seconds=float(os.getenv("VBF_LLM_HTTP_TIMEOUT_SECONDS", "60.0")),
@@ -195,12 +231,17 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
         api_key=data["api_key"],
         model=data["model"],
         temperature=float(data.get("temperature", 0.2)),
+        api_protocol=str(data.get("api_protocol", "openai_responses")),
+        auth_scheme=_normalize_auth_scheme(data.get("auth_scheme", "auto")),
         chat_completions_path=data.get("chat_completions_path", "/v1/chat/completions"),
+        responses_path=data.get("responses_path", "/v1/responses"),
         use_response_format_json_object=bool(data.get("use_response_format_json_object", True)),
         use_llm=bool(data.get("use_llm", True)),
         allow_low_level_gateway=_parse_bool_field(data, "allow_low_level_gateway", False),
         auto_allow_low_level_gateway=_parse_bool_field(data, "auto_allow_low_level_gateway", True),
-        is_proxy_api=_parse_bool_field(data, "is_proxy_api", False),
+        enable_proxy_compatibility_mode=_parse_bool_field(
+            data, "enable_proxy_compatibility_mode", False
+        ),
         enable_extra_request_headers=_parse_bool_field(data, "enable_extra_request_headers", False),
         use_curl_http_compat=_parse_bool_field(data, "use_curl_http_compat", False),
         http_timeout_seconds=float(
@@ -208,7 +249,9 @@ def load_openai_compat_config(config_path: Optional[str] = None) -> Optional[Ope
         ),
         request_headers=_resolve_request_headers(
             data.get("request_headers"),
-            is_proxy_api=_parse_bool_field(data, "is_proxy_api", False),
+            enable_proxy_compatibility_mode=_parse_bool_field(
+                data, "enable_proxy_compatibility_mode", False
+            ),
             enable_extra_request_headers=_parse_bool_field(data, "enable_extra_request_headers", False),
         ),
     )
@@ -231,7 +274,11 @@ class OpenAICompatLLM:
             "Content-Type": "application/json",
         }
         if self.cfg.api_key:
-            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
+            auth_scheme = _normalize_auth_scheme(self.cfg.auth_scheme, default="bearer")
+            if auth_scheme == "x-api-key":
+                headers["x-api-key"] = self.cfg.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         if self.cfg.request_headers:
             headers.update(self.cfg.request_headers)
         return headers

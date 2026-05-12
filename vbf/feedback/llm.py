@@ -179,6 +179,15 @@ Quality guidelines:
 - "warning" (0.4-0.7): Minor issues, should be addressed but not blocking
 - "bad" (0.0-0.4): Significant problems requiring attention, consider checkpoint
 
+Stage boundary rules:
+- Judge only the current completed stage: {stage}.
+- Do not mark future-stage work as critical for this stage. For example, while judging
+  geometry_modeling, missing materials, UVs, lighting, animation, camera setup, or render
+  settings belong in recommendations.next_stage or recommendations.overall.
+- critical_issues must contain only problems that block the current stage from continuing,
+  such as missing core geometry, incoherent structure, failed execution output, or broken
+  hierarchy.
+
 Score calculation (0.0-1.0):
 Consider: geometric accuracy, structural integrity, proportion correctness,
 topology quality, and progress toward the stated goal.

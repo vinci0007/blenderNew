@@ -4,6 +4,42 @@ This project follows a Keep a Changelog style structure.
 
 The entries below focus on meaningful user-facing, architecture, and workflow changes rather than listing every commit.
 
+## [2.3.3] - 2026-04-30
+
+### Added
+
+- Added `auth_scheme = "auto" | "bearer" | "x-api-key"` for providers that use Anthropic Messages-compatible request bodies but require a non-Anthropic authentication header, such as LongCat's `Authorization: Bearer` flow.
+- Added executor health telemetry for Blender skill execution, including `poll_stale`, `skipped_jobs`, `executor_recovery_count`, and `last_executor_recovery`.
+- Added a conservative `vbf.recover_executor` JSON-RPC endpoint that can restart the Blender app timer only when the executor queue is stale and no skill is currently running.
+- Added client-side executor backpressure before `execute_skill` so VBF waits for Blender's executor to become idle instead of piling new requests onto an unhealthy queue.
+- Added queued-job deadlines so stale, not-yet-started skill requests are skipped if the client disconnected or the queue deadline expired before execution.
+- Added multimodal planning input via `--image` / `--image-file`, forwarding prompt text and one or more reference images to vision-capable LLM providers.
+
+### Changed
+
+- Changed LongCat Anthropic Messages configuration to keep `api_protocol = "claude_responses"` while selecting Bearer authentication through `auth_scheme = "bearer"`.
+- Changed addon self-check and runtime status handling to tolerate older server objects that do not expose executor health diagnostics.
+- Documented runtime controls for `executor_backpressure_enabled` and `executor_ready_timeout_seconds`.
+- Changed adaptive batch quality repair to be stage-aware: downstream-stage gaps such as materials, lighting, animation, camera, and render setup are carried as pending work instead of repeatedly repairing the current geometry batch.
+- Changed batch-quality repair accounting to use a separate quality-repair budget so iterative batch cleanup does not consume the step-level `max_replans` budget used for actual execution failures.
+
+### Fixed
+
+- Fixed LongCat `401 missing_api_key` failures caused by sending `x-api-key` to a gateway that expects `Authorization: Bearer`.
+- Fixed the class of hangs where WebSocket remained bound and `timer_registered` looked true, but Blender's main-thread executor poll had stopped consuming queued `vbf.execute_skill` jobs.
+- Fixed late execution risk after CLI timeout/resume by skipping stale queued jobs before they start, rather than letting old requests modify the scene later.
+- Fixed adaptive agent-loop batch repair loops that could exhaust `max_replans` when the analyzer reported future-stage work as current-stage `critical_issues`.
+- Fixed batch repair step ID collisions by reindexing repaired batch steps and clearing replaced batch results before replay.
+- Fixed unsafe batch repair plans that attempted to delete established prior parent/control objects while later repair steps still referenced them.
+
+### Tests
+
+- Verified targeted regression coverage with:
+  - `uv run pytest tests/test_openai_compat_adapter_response_format.py tests/test_config_runtime.py -q`
+  - `uv run pytest tests/test_feedback_control_errors.py tests/test_jsonrpc_ws.py tests/test_config_runtime.py tests/test_addon_self_check.py tests/test_feedback_system.py tests/test_client_scene_capture.py tests/test_client_replan_loop_guard.py -q`
+  - `uv run pytest tests/test_feedback_system.py tests/test_client_replan_loop_guard.py -q`
+  - `uv run pytest tests/test_feedback_system.py tests/test_client_replan_loop_guard.py tests/test_config_runtime.py -q`
+
 ## [2.3.2] - 2026-04-28
 
 ### Changed

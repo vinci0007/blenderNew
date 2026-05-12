@@ -139,16 +139,21 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "api_key_env": ["VBF_LLM_API_KEY"],  # Fallback env var
         "default_model": _MODEL_CONFIG.get("model", "gpt-4o-mini"),
         "supports_streaming": _MODEL_CONFIG.get("supports_streaming", True),
+        "api_protocol": _MODEL_CONFIG.get("api_protocol", "openai_responses"),
+        "auth_scheme": _MODEL_CONFIG.get("auth_scheme", "auto"),
         "chat_completions_path": _MODEL_CONFIG.get(
             "chat_completions_path", "/chat/completions"
         ),
+        "responses_path": _MODEL_CONFIG.get("responses_path", "/responses"),
         "response_format": {"type": "json_object"}
         if _MODEL_CONFIG.get("use_response_format_json_object", False)
         else {},
         "use_function_calling": _MODEL_CONFIG.get("use_function_calling", True),
         "use_streaming": _MODEL_CONFIG.get("use_streaming", "auto"),
         "temperature": _MODEL_CONFIG.get("temperature", 0.2),
-        "is_proxy_api": _MODEL_CONFIG.get("is_proxy_api", False),
+        "enable_proxy_compatibility_mode": _MODEL_CONFIG.get(
+            "enable_proxy_compatibility_mode", False
+        ),
         "enable_extra_request_headers": _MODEL_CONFIG.get("enable_extra_request_headers", False),
         "use_curl_http_compat": _MODEL_CONFIG.get("use_curl_http_compat", False),
         "http_timeout_seconds": _MODEL_CONFIG.get("llm_api_throttling", {}).get("call_timeout_seconds", 60.0),

@@ -6,6 +6,28 @@
 
 **中文** | **[English](CHANGELOG.md)**
 
+## [2.3.3] - 2026-04-30
+
+### 新增
+
+- 新增 `auth_scheme = "auto" | "bearer" | "x-api-key"`，用于 LongCat 等兼容 Anthropic Messages 请求体、但鉴权头要求不同的模型平台。
+- 新增 Blender executor 健康状态字段：`poll_stale`、`skipped_jobs`、`executor_recovery_count`、`last_executor_recovery`。
+- 新增 `vbf.recover_executor` JSON-RPC，用于在队列卡住且没有正在执行的技能时自动重挂 Blender app timer。
+- 新增客户端执行前 backpressure，避免超时或 resume 后继续向异常队列堆积 `execute_skill` 请求。
+- 新增未开始执行的 queued job deadline，客户端断开或排队过期后不会再晚到修改场景。
+
+### 变更
+
+- LongCat 的 Anthropic Messages 配置保持 `api_protocol = "claude_responses"`，通过 `auth_scheme = "bearer"` 单独控制 Bearer 鉴权。
+- addon self-check 对旧 server 对象更加兼容，不再假设一定存在 executor health 接口。
+- 在配置模板中补充 `[llm.runtime]` 的 `executor_backpressure_enabled` 与 `executor_ready_timeout_seconds` 说明。
+
+### 修复
+
+- 修复 LongCat `/anthropic/v1/messages` 因发送 `x-api-key` 而触发 `401 missing_api_key` 的问题。
+- 修复 WebSocket 仍绑定、`timer_registered=true`，但 Blender 主线程 executor poll 停止消费队列时导致所有技能超时的问题。
+- 修复 CLI 超时后旧请求仍留在队列、后续可能晚到修改场景的风险。
+
 ## [2.3.2] - 2026-04-28
 
 ### 变更

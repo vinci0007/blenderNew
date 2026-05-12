@@ -1,11 +1,44 @@
 import pytest
 
 from vbf.app.client import VBFClient
+from vbf.app.planning_service import build_batched_stage_prompt
+from vbf.app.stage_intent import StageIntent
+from vbf.adapters.skill_registry import SkillRegistry
 
 
 class _CompressionAdapter:
     def get_skill_description(self, skill_name: str):
         return skill_name.replace("_", " ")
+
+
+def test_batched_stage_prompt_includes_prior_object_table():
+    client = VBFClient()
+    prompt = build_batched_stage_prompt(
+        client,
+        prompt="create complex asset",
+        stage="geometry_modeling",
+        batch_index=2,
+        max_steps=12,
+        completed_summary=[
+            {
+                "stage": "geometry_modeling",
+                "batch_index": 1,
+                "created_objects": [
+                    {
+                        "step_id": "003",
+                        "skill": "create_primitive",
+                        "planned_name": "GEO_Turntable_Rotation_Control",
+                        "object_name": "GEO_Turntable_Rotation_Control",
+                    }
+                ],
+            }
+        ],
+        pending_work=["add side intakes"],
+    )
+
+    assert "PRIOR BATCH OBJECT TABLE" in prompt
+    assert "GEO_Turntable_Rotation_Control" in prompt
+    assert "Do not invent synonymous parent names" in prompt
 
 
 @pytest.mark.asyncio
@@ -65,7 +98,7 @@ async def test_requirement_assessment_failure_does_not_fallback_to_other_plannin
     client = VBFClient()
 
     async def _fail_adaptive(prompt, allowed_skills, save_path):
-        raise RuntimeError("requirement_assessment_failed_no_local_fallback: timeout")
+        raise RuntimeError("requirement_assessment_llm_failed_local_fallback_disabled: timeout")
 
     async def _unexpected_single(prompt, allowed_skills, save_path):
         raise AssertionError("single-stage planning should not run after assessment failure")
@@ -74,7 +107,7 @@ async def test_requirement_assessment_failure_does_not_fallback_to_other_plannin
     monkeypatch.setattr(client, "_plan_skill_task", _unexpected_single)
     monkeypatch.setattr("vbf.app.client.load_llm_section", lambda: {"planning_mode": "adaptive_staged"})
 
-    with pytest.raises(RuntimeError, match="requirement_assessment_failed_no_local_fallback"):
+    with pytest.raises(RuntimeError, match="requirement_assessment_llm_failed_local_fallback_disabled"):
         await client._plan_skill_task_auto(
             "Create a product model",
             ["create_primitive"],
@@ -447,6 +480,7 @@ async def test_adaptive_staged_planning_runs_stage_specific_skill_sets(monkeypat
         return VBFClient._analyze_stage_intent(prompt)
 
     monkeypatch.setattr(client, "_assess_adaptive_stage_intent", _fake_assess)
+    monkeypatch.setattr(client, "_get_planning_loop_config", lambda: {"mode": "full_plan"})
     plan, steps = await client._plan_skill_task_adaptive_staged(
         prompt="Create a cinematic phone falling animation with materials and lighting render",
         allowed_skills=[
@@ -477,6 +511,131 @@ async def test_adaptive_staged_planning_runs_stage_specific_skill_sets(monkeypat
     animation_call = next(call for call in calls if "ADAPTIVE STAGE / ANIMATION" in call["prompt"])
     assert "insert_keyframe" in animation_call["skills"]
     assert "assign_material" not in animation_call["skills"]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_batched_planning_splits_stage_batches(monkeypatch, tmp_path):
+    client = VBFClient()
+    client._runtime_paths["cache_dir"] = str(tmp_path)
+    monkeypatch.setattr(
+        client,
+        "_get_planning_loop_config",
+        lambda: {
+            "mode": "batched",
+            "max_steps_per_batch": 2,
+            "max_batches_per_stage": 3,
+            "save_partial_plan": True,
+        },
+    )
+
+    async def _fake_assess(prompt):
+        return StageIntent(
+            stages=["geometry_modeling"],
+            primary_stage="geometry_modeling",
+            confidence=1.0,
+            explicit_scope="llm_explicit",
+            has_conflict=False,
+        )
+
+    monkeypatch.setattr(client, "_assess_adaptive_stage_intent", _fake_assess)
+    calls = []
+
+    async def _fake_plan(prompt, allowed_skills, save_path):
+        calls.append(prompt)
+        continue_stage = len(calls) == 1
+        return (
+            {
+                "vbf_version": "2.1",
+                "plan_type": "skills_plan",
+                "steps": [],
+                "continue_stage": continue_stage,
+                "remaining_work": ["finish body"] if continue_stage else [],
+            },
+            [
+                {
+                    "step_id": "001",
+                    "skill": "create_primitive",
+                    "args": {"primitive_type": "cube"},
+                }
+            ],
+        )
+
+    monkeypatch.setattr(client, "_plan_skill_task", _fake_plan)
+
+    plan, steps = await client._plan_skill_task_adaptive_staged(
+        "create complex asset",
+        ["create_primitive"],
+        str(tmp_path / "task_state.json"),
+    )
+
+    assert plan["metadata"]["planning_mode"] == "adaptive_batched"
+    assert len(calls) == 2
+    assert len(steps) == 2
+    assert steps[0]["step_id"] == "001"
+    assert steps[1]["step_id"] == "002"
+    assert list(tmp_path.glob("task_ledger_*.json"))
+
+
+@pytest.mark.asyncio
+async def test_adaptive_agent_loop_plans_only_first_batch(monkeypatch, tmp_path):
+    client = VBFClient()
+    client._runtime_paths["cache_dir"] = str(tmp_path)
+    monkeypatch.setattr(
+        client,
+        "_get_planning_loop_config",
+        lambda: {
+            "mode": "agent_loop",
+            "max_steps_per_batch": 2,
+            "max_batches_per_stage": 3,
+            "save_partial_plan": True,
+        },
+    )
+
+    async def _fake_assess(prompt):
+        return StageIntent(
+            stages=["geometry_modeling"],
+            primary_stage="geometry_modeling",
+            confidence=1.0,
+            explicit_scope="llm_explicit",
+            has_conflict=False,
+        )
+
+    monkeypatch.setattr(client, "_assess_adaptive_stage_intent", _fake_assess)
+    calls = []
+
+    async def _fake_plan(prompt, allowed_skills, save_path):
+        calls.append(prompt)
+        return (
+            {
+                "vbf_version": "2.1",
+                "plan_type": "skills_plan",
+                "steps": [],
+                "continue_stage": True,
+                "remaining_work": ["finish body"],
+            },
+            [
+                {
+                    "step_id": "001",
+                    "skill": "create_primitive",
+                    "args": {"primitive_type": "cube"},
+                }
+            ],
+        )
+
+    monkeypatch.setattr(client, "_plan_skill_task", _fake_plan)
+
+    plan, steps = await client._plan_skill_task_adaptive_staged(
+        "create complex asset",
+        ["create_primitive"],
+        str(tmp_path / "task_state.json"),
+    )
+
+    assert len(calls) == 1
+    assert len(steps) == 1
+    assert plan["metadata"]["planning_mode"] == "adaptive_agent_loop"
+    assert plan["metadata"]["continue_stage"] is True
+    assert plan["metadata"]["remaining_work"] == ["finish body"]
+    assert list(tmp_path.glob("task_ledger_*.json"))
 
 
 @pytest.mark.asyncio
@@ -528,6 +687,41 @@ async def test_requirement_assessment_uses_llm_stage_decision(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_requirement_assessment_uses_lightweight_llm_call_without_skill_registry(monkeypatch):
+    client = VBFClient()
+    calls = []
+
+    class _Adapter:
+        async def call_llm(self, messages):
+            calls.append(messages)
+            return {
+                "requested_stages": ["geometry_modeling"],
+                "excluded_stages": [],
+                "deliverable_level": "model_asset",
+                "explicit_scope": True,
+                "confidence": 0.92,
+                "reason": "The user only asked for modeling.",
+                "risks": [],
+            }
+
+    async def _fake_ensure_adapter(load_skills=True):
+        assert load_skills is False
+        return _Adapter()
+
+    monkeypatch.setattr(client, "_ensure_adapter", _fake_ensure_adapter)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {"requirement_assessment": {"mode": "always", "timeout_seconds": 5}},
+    )
+
+    intent = await client._assess_adaptive_stage_intent("Only create the model")
+
+    assert intent.stages == ["geometry_modeling"]
+    assert intent.explicit_scope == "llm_explicit"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_requirement_assessment_no_local_fallback_raises_on_llm_failure(monkeypatch):
     client = VBFClient()
 
@@ -546,8 +740,64 @@ async def test_requirement_assessment_no_local_fallback_raises_on_llm_failure(mo
         },
     )
 
-    with pytest.raises(RuntimeError, match="requirement_assessment_failed_no_local_fallback"):
+    with pytest.raises(RuntimeError, match="requirement_assessment_llm_failed_local_fallback_disabled"):
         await client._assess_adaptive_stage_intent("Only create the model")
+
+
+@pytest.mark.asyncio
+async def test_requirement_assessment_auto_does_not_fallback_without_local_enabled(monkeypatch):
+    client = VBFClient()
+
+    async def _fake_call(messages):
+        raise TimeoutError("assessment timeout")
+
+    monkeypatch.setattr(client, "_adapter_call", _fake_call)
+    monkeypatch.setattr(
+        "vbf.app.client.load_llm_section",
+        lambda: {
+            "requirement_assessment": {
+                "mode": "auto",
+                "timeout_seconds": 5,
+                "enable_local_fallback": False,
+            }
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="requirement_assessment_llm_failed_local_fallback_disabled"):
+        await client._assess_adaptive_stage_intent("Only create the model")
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_reuses_client_cached_skill_names():
+    SkillRegistry.reset()
+    registry = SkillRegistry.get_instance()
+
+    class _Client:
+        _cached_skill_names = ["create_primitive"]
+        list_calls = 0
+
+        async def list_skills(self):
+            self.list_calls += 1
+            return ["unexpected_skill"]
+
+        async def describe_skills(self, skill_names):
+            assert skill_names == ["create_primitive"]
+            return {
+                "create_primitive": {
+                    "description": "Create a primitive",
+                    "args": {},
+                }
+            }
+
+    client = _Client()
+
+    try:
+        count = await registry.load_skills(client)
+        assert count == 1
+        assert client.list_calls == 0
+        assert registry.list_skills() == ["create_primitive"]
+    finally:
+        SkillRegistry.reset()
 
 
 @pytest.mark.asyncio

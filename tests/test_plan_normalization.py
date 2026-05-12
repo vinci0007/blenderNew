@@ -7,11 +7,13 @@ from vbf.core.plan_normalization import (
     extract_skills_plan,
     normalize_step_field_names,
     apply_parameter_aliases,
+    canonicalize_step_skill,
     ensure_on_success_structure,
     normalize_plan,
     validate_plan_structure,
     PARAMETER_ALIASES,
 )
+from vbf.app.client import VBFClient
 
 
 class TestExtractSkillsPlan:
@@ -147,11 +149,41 @@ class TestApplyParameterAliases:
         apply_parameter_aliases("create_primitive", args)
         assert args == {"primitive_type": "sphere"}
 
+    def test_create_primitive_torus_aliases_to_executable_cylinder(self):
+        """Should replace unsupported torus-like primitive requests."""
+        args = {"primitive_type": "torus", "name": "GEO_Tire"}
+        apply_parameter_aliases("create_primitive", args)
+        assert args == {"primitive_type": "cylinder", "name": "GEO_Tire"}
+
+    def test_create_primitive_name_and_dimensions_aliases(self):
+        """Should normalize generated object_name/dimensions before execution."""
+        args = {
+            "primitive_type": "cube",
+            "object_name": "Hypercar_Scale_Root",
+            "dimensions": [0.08, 0.08, 0.08],
+            "location": [0, 0, 0],
+        }
+        apply_parameter_aliases("create_primitive", args)
+        assert args == {
+            "primitive_type": "cube",
+            "name": "Hypercar_Scale_Root",
+            "size": [0.08, 0.08, 0.08],
+            "location": [0, 0, 0],
+        }
+
     def test_create_beveled_box_dimensions_alias(self):
         """Should rename dimensions to size for create_beveled_box."""
-        args = {"dimensions": [1.0, 2.0, 3.0], "position": [0, 0, 0]}
+        args = {
+            "object_name": "GEO_Test_Box",
+            "dimensions": [1.0, 2.0, 3.0],
+            "position": [0, 0, 0],
+        }
         apply_parameter_aliases("create_beveled_box", args)
-        assert args == {"size": [1.0, 2.0, 3.0], "location": [0, 0, 0]}
+        assert args == {
+            "name": "GEO_Test_Box",
+            "size": [1.0, 2.0, 3.0],
+            "location": [0, 0, 0],
+        }
 
     def test_create_beveled_box_compose_size_from_width_height_depth(self):
         """Should compose size from width/height/depth when needed."""
@@ -184,6 +216,61 @@ class TestApplyParameterAliases:
             "target_name": "Body",
             "tool_name": "Cutter",
         }
+
+
+class TestCanonicalizeStepSkill:
+    """Tests for semantic skill name canonicalization."""
+
+    def test_create_cylinder_alias_to_create_primitive(self):
+        step = {
+            "skill": "create_cylinder",
+            "args": {
+                "name": "DisplayBase",
+                "radius": 1.2,
+                "depth": 0.08,
+            },
+        }
+        canonicalize_step_skill(step)
+        assert step["skill"] == "create_primitive"
+        assert step["args"]["primitive_type"] == "cylinder"
+        assert step["args"]["height"] == 0.08
+        assert "depth" not in step["args"]
+
+    def test_create_sphere_alias_to_create_primitive(self):
+        step = {"skill": "create_uv_sphere", "args": {"name": "Lens", "radius": 0.2}}
+        canonicalize_step_skill(step)
+        assert step["skill"] == "create_primitive"
+        assert step["args"]["primitive_type"] == "sphere"
+
+    def test_does_not_coerce_non_primitive_skills_to_create_primitive(self):
+        examples = [
+            {"skill": "create_material_pbr", "args": {"name": "Paint"}},
+            {"skill": "create_light", "args": {"name": "Key"}},
+            {"skill": "add_modifier_bevel", "args": {"object_name": "Body"}},
+            {"skill": "shade_smooth", "args": {"object_name": "Body"}},
+            {"skill": "cylinder", "args": {"name": "NotARegisteredAlias"}},
+        ]
+
+        for step in examples:
+            original = step["skill"]
+            canonicalize_step_skill(step)
+            assert step["skill"] == original
+
+    def test_normalize_plan_applies_skill_alias_before_validation(self):
+        plan = {
+            "steps": [
+                {
+                    "step_id": "001",
+                    "skill": "create_cylinder",
+                    "args": {"name": "Turntable", "radius": 1.0, "depth": 0.1},
+                }
+            ]
+        }
+        result = normalize_plan(plan)
+        step = result["steps"][0]
+        assert step["skill"] == "create_primitive"
+        assert step["args"]["primitive_type"] == "cylinder"
+        assert step["args"]["height"] == 0.1
 
 
 class TestEnsureOnSuccessStructure:
@@ -267,6 +354,42 @@ class TestNormalizePlan:
                     ]
                 }
             )
+
+    def test_create_primitive_depth_aliases_to_height_and_drops_vertices(self):
+        raw_plan = {
+            "steps": [
+                {
+                    "step_id": "s1",
+                    "skill": "create_primitive",
+                    "args": {
+                        "primitive_type": "cylinder",
+                        "name": "Wheel",
+                        "location": [0, 0, 0],
+                        "radius": 0.2,
+                        "depth": 0.1,
+                        "vertices": 48,
+                    },
+                }
+            ]
+        }
+
+        result = normalize_plan(raw_plan)
+        args = result["steps"][0]["args"]
+
+        assert args["height"] == 0.1
+        assert "depth" not in args
+        assert "vertices" not in args
+
+
+class TestModelingContract:
+    def test_modeling_contract_uses_domain_neutral_schema_authority(self):
+        contract = VBFClient._modeling_quality_contract()
+        assert "phone-like" not in contract
+        assert "GEO_Phone" not in contract
+        assert "GEO_Main_Body" in contract
+        assert "registered skill description, function name, and parameter signature" in contract
+        assert "source of truth" in contract
+        assert "never authorize unsupported parameters" in contract
 
 
 class TestValidatePlanStructure:

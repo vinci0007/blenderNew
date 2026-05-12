@@ -113,6 +113,7 @@ class RateLimiter:
         self,
         coro_factory: callable,
         *args,
+        hard_timeout: bool = True,
         **kwargs
     ) -> Any:
         """Execute a coroutine with throttling and retry logic.
@@ -135,11 +136,15 @@ class RateLimiter:
 
             for attempt in range(max_attempts + 1):
                 try:
-                    # Execute with timeout
-                    return await asyncio.wait_for(
-                        coro_factory(*args, **kwargs),
-                        timeout=self.config.call_timeout_seconds
-                    )
+                    if hard_timeout:
+                        # Execute with an outer timeout. Use only for coroutines
+                        # that are safe to cancel; blocking thread-backed HTTP
+                        # calls should rely on their own transport timeout.
+                        return await asyncio.wait_for(
+                            coro_factory(*args, **kwargs),
+                            timeout=self.config.call_timeout_seconds,
+                        )
+                    return await coro_factory(*args, **kwargs)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     # TimeoutError: asyncio.wait_for timed out -> model slow/processing
                     # CancelledError: BaseException (not caught by 'except Exception')
@@ -267,7 +272,12 @@ def get_rate_limiter() -> RateLimiter:
     return _rate_limiter
 
 
-async def call_llm_with_throttle(coro_factory: callable, *args, **kwargs) -> Any:
+async def call_llm_with_throttle(
+    coro_factory: callable,
+    *args,
+    hard_timeout: bool = True,
+    **kwargs,
+) -> Any:
     """Convenience function to call LLM with throttling.
 
     Usage:
@@ -279,4 +289,9 @@ async def call_llm_with_throttle(coro_factory: callable, *args, **kwargs) -> Any
         )
     """
     limiter = get_rate_limiter()
-    return await limiter.execute_with_throttle(coro_factory, *args, **kwargs)
+    return await limiter.execute_with_throttle(
+        coro_factory,
+        *args,
+        hard_timeout=hard_timeout,
+        **kwargs,
+    )

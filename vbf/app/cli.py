@@ -5,6 +5,7 @@ from pathlib import Path
 from .client import VBFClient
 from ..config_runtime import load_project_paths
 from ..core.task_state import TaskInterruptedError
+from ..core.visual_inputs import load_image_content_blocks
 from ..runtime.run_logging import (
     append_run_event,
     create_task_log_context,
@@ -29,6 +30,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PROMPT_FILE",
         help="Read modeling prompt from a UTF-8 text file",
+    )
+    p.add_argument(
+        "--image",
+        "--image-file",
+        dest="images",
+        action="append",
+        default=[],
+        metavar="IMAGE_FILE",
+        help="Attach an image reference for multimodal LLM planning; can be passed multiple times",
     )
     p.add_argument(
         "--host",
@@ -110,24 +120,32 @@ def _merge_prompt_tokens(prompt_tokens: str | list[str]) -> str:
 def _resolve_prompt_and_resume_arg(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[dict]]:
     """Resolve prompt text and a corresponding resume command argument."""
     if args.prompt is not None and args.prompt_file is not None:
         parser.error("--prompt and --prompt-file are mutually exclusive")
+
+    visual_inputs: list[dict] = []
+    if args.images:
+        try:
+            visual_inputs = load_image_content_blocks(args.images)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    image_resume_arg = "".join(f' --image "{image}"' for image in (args.images or []))
 
     if args.prompt_file is not None:
         try:
             prompt_text = Path(args.prompt_file).read_text(encoding="utf-8-sig")
         except OSError as exc:
             parser.error(f"failed to read --prompt-file '{args.prompt_file}': {exc}")
-        return prompt_text, f'--prompt-file "{args.prompt_file}"'
+        return prompt_text, f'--prompt-file "{args.prompt_file}"{image_resume_arg}', visual_inputs
 
     if args.prompt is not None:
         prompt_text = _merge_prompt_tokens(args.prompt)
-        return prompt_text, f'--prompt "{prompt_text}"'
+        return prompt_text, f'--prompt "{prompt_text}"{image_resume_arg}', visual_inputs
 
     parser.error("one of --prompt or --prompt-file is required (unless --list-styles)")
-    return "", ""
+    return "", "", []
 
 
 async def _run(
@@ -142,6 +160,7 @@ async def _run(
     no_feedback: bool = False,
     no_auto_check: bool = False,
     no_llm_feedback: bool = False,
+    visual_inputs: list[dict] | None = None,
 ) -> int:
     runtime_paths = load_project_paths()
     log_context = create_task_log_context(runtime_paths["logs_dir"])
@@ -152,6 +171,9 @@ async def _run(
         print(f"[VBF] Task created: {log_context.created_at}")
         print(f"[VBF] Task log: {log_context.transcript_path}")
         client = VBFClient(host=host, port=port, blender_path=blender_path)
+        if visual_inputs:
+            client.set_visual_inputs(visual_inputs)
+            print(f"[VBF] Visual inputs attached: {len(visual_inputs)} image(s)")
         client._task_id = log_context.task_id
         client._task_log_path = str(log_context.transcript_path)
         client._task_logging_managed = True
@@ -243,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         print(get_style_help_text())
         return 0
 
-    prompt, resume_prompt_arg = _resolve_prompt_and_resume_arg(parser, args)
+    prompt, resume_prompt_arg, visual_inputs = _resolve_prompt_and_resume_arg(parser, args)
 
     return asyncio.run(
         _run(
@@ -258,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             args.no_feedback,
             args.no_auto_check,
             args.no_llm_feedback,
+            visual_inputs,
         )
     )
 

@@ -1,6 +1,7 @@
 """Core domain models and plan/reference utilities."""
 
 from .task_state import TaskState, TaskInterruptedError
+from .task_ledger import TaskLedger, ledger_path_for_task
 from .scene_state import SceneState, FeedbackContext
 from .plan_normalization import (
     extract_skills_plan,
@@ -13,6 +14,8 @@ from .vibe_protocol import merge_step_results_for_prompt, resolve_refs, resolve_
 __all__ = [
     "TaskState",
     "TaskInterruptedError",
+    "TaskLedger",
+    "ledger_path_for_task",
     "SceneState",
     "FeedbackContext",
     "extract_skills_plan",

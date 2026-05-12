@@ -22,8 +22,22 @@ from .streaming_chat_completion_aggregator import (
     StreamingChatCompletionAggregator,
     iter_sse_json_chunks,
 )
+from .endpoint_protocol import (
+    EndpointStreamingAggregator,
+    build_protocol_request,
+    iter_endpoint_sse_json_chunks,
+    normalize_api_protocol,
+)
+from .internal_response import (
+    VBFLLMResponse,
+    chat_completion_to_internal,
+    content_to_internal,
+    endpoint_response_to_internal,
+    internal_tool_call_to_chat,
+)
 from ..llm.openai_compat import (
     _build_chat_completions_url,
+    _normalize_auth_scheme,
     _parse_bool_field,
     _resolve_request_headers,
 )
@@ -47,6 +61,25 @@ class OpenAICompatAdapter(VBFModelAdapter):
     load_skill() tool when LLM needs it.
     """
     _COMPAT_MODE_CACHE: Dict[str, Dict[str, Any]] = {}
+    _DEFAULT_SCHEMA_CARD_PRIORITY_SKILLS = (
+        "create_primitive",
+        "create_beveled_box",
+        "apply_transform",
+        "set_parent",
+        "add_modifier_boolean",
+        "boolean_tool",
+        "add_modifier_bevel",
+        "apply_modifier",
+        "create_material_pbr",
+        "assign_material",
+        "create_light",
+        "set_light_properties",
+        "create_camera",
+        "set_camera_active",
+        "set_render_engine",
+        "set_render_resolution",
+        "set_cycles_samples",
+    )
 
     class _CompatHTTPError(RuntimeError):
         def __init__(self, status_code: int, message: str):
@@ -69,6 +102,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
         self.chat_completions_path = model_config.get(
             "chat_completions_path", "/chat/completions"
         )
+        self.api_protocol = normalize_api_protocol(model_config.get("api_protocol", "openai_responses"))
+        self.auth_scheme = _normalize_auth_scheme(model_config.get("auth_scheme", "auto"))
+        default_responses_path = "/messages" if self.api_protocol == "claude_responses" else "/responses"
+        self.responses_path = model_config.get("responses_path", default_responses_path)
         self.response_format = model_config.get("response_format", {})
         self.supports_streaming = model_config.get("supports_streaming", False)
         self.few_shot_required = model_config.get("few_shot_required", False)
@@ -84,6 +121,26 @@ class OpenAICompatAdapter(VBFModelAdapter):
             if isinstance(model_config.get("planning_capability_probe"), dict)
             else {}
         )
+        raw_planning_tool_mode = (
+            model_config.get("planning_tool_mode")
+            or model_config.get("planning_tools_mode")
+            or self.planning_context.get("planning_tool_mode")
+            or "schema"
+        )
+        self.planning_tool_mode = str(raw_planning_tool_mode).strip().lower()
+        try:
+            self.planning_skill_tool_limit = max(
+                0,
+                int(
+                    model_config.get(
+                        "planning_skill_tool_limit",
+                        self.planning_context.get("planning_skill_tool_limit", 32),
+                    )
+                ),
+            )
+        except Exception:
+            self.planning_skill_tool_limit = 32
+        self._active_skills_subset: Optional[List[str]] = None
 
         # Progressive disclosure: use function calling for on-demand skill loading
         use_function_calling = model_config.get("use_function_calling", True)
@@ -116,7 +173,9 @@ class OpenAICompatAdapter(VBFModelAdapter):
             if isinstance(api_key_env, str):
                 api_key_env = [api_key_env]
             self.api_key = self._resolve_api_key(api_key_env)
-        self.is_proxy_api = _parse_bool_field(model_config, "is_proxy_api", False)
+        self.enable_proxy_compatibility_mode = _parse_bool_field(
+            model_config, "enable_proxy_compatibility_mode", False
+        )
         self.enable_extra_request_headers = _parse_bool_field(
             model_config, "enable_extra_request_headers", False
         )
@@ -124,12 +183,14 @@ class OpenAICompatAdapter(VBFModelAdapter):
         self.http_timeout_seconds = float(model_config.get("http_timeout_seconds", 60.0))
         self.request_headers = _resolve_request_headers(
             model_config.get("request_headers"),
-            is_proxy_api=self.is_proxy_api,
+            enable_proxy_compatibility_mode=self.enable_proxy_compatibility_mode,
             enable_extra_request_headers=self.enable_extra_request_headers,
         )
 
-        # Runtime compatibility mode (provider-specific, cached in-process).
-        self._compat_mode_key = f"{self.base_url}|{self.default_model}"
+        # Runtime compatibility mode (provider/protocol/endpoint-specific,
+        # cached in-process). Chat, Responses, and Messages-compatible
+        # endpoints may reject different fields even for the same model.
+        self._compat_mode_key = self._build_compat_mode_key()
         default_allow_json = self.response_format.get("type") == "json_object"
         default_allow_tools = bool(self.use_function_calling)
         default_allow_streaming = bool(self.use_streaming and self.supports_streaming)
@@ -138,6 +199,17 @@ class OpenAICompatAdapter(VBFModelAdapter):
         self._allow_tools = bool(cached.get("allow_tools", default_allow_tools))
         self._allow_streaming = bool(cached.get("allow_streaming", default_allow_streaming))
         self._compat_mode_logged = False
+
+    def _build_compat_mode_key(self) -> str:
+        return "|".join(
+            [
+                str(self.base_url or ""),
+                str(self.default_model or ""),
+                self.api_protocol,
+                self._endpoint_path(),
+                f"proxy={int(self.enable_proxy_compatibility_mode)}",
+            ]
+        )
 
     def _resolve_api_key(self, env_vars: List[str]) -> Optional[str]:
         """Get API key from environment variables."""
@@ -259,17 +331,158 @@ class OpenAICompatAdapter(VBFModelAdapter):
             return "str"
         return "any"
 
-    def _build_schema_cards(self, skills_to_include: List[str], max_cards: int = 12) -> str:
+    @staticmethod
+    def _json_schema_for_type_hint(type_hint: Any) -> Dict[str, Any]:
+        normalized = OpenAICompatAdapter._normalize_type_hint(type_hint)
+        if normalized == "int":
+            return {"type": "integer"}
+        if normalized == "float":
+            return {"type": "number"}
+        if normalized == "bool":
+            return {"type": "boolean"}
+        if normalized == "dict":
+            return {"type": "object"}
+        if normalized == "list":
+            return {"type": "array"}
+        if normalized == "str":
+            return {"type": "string"}
+        return {}
+
+    def _planning_skill_tools_enabled(self) -> bool:
+        return self.planning_tool_mode in {
+            "schema",
+            "schema_tools",
+            "skill_schema",
+            "skill_tools",
+            "planning_schema",
+            "planning_tools",
+            "doc_and_schema",
+            "doc_and_skill_tools",
+        }
+
+    def _planning_tool_skill_names_for_request(self) -> List[str]:
+        if not self._planning_skill_tools_enabled() or self.planning_skill_tool_limit <= 0:
+            return []
+        if not self._active_skills_subset:
+            return []
+
+        names: List[str] = []
+        seen = {"load_skill"}
+        for name in self._active_skills_subset:
+            if not isinstance(name, str) or name in seen:
+                continue
+            if not self.validate_skill(name):
+                continue
+            names.append(name)
+            seen.add(name)
+            if len(names) >= self.planning_skill_tool_limit:
+                break
+        return names
+
+    def _build_planning_skill_tool(self, skill_name: str) -> Optional[Dict[str, Any]]:
+        skill = self.get_skill_full(skill_name)
+        if not isinstance(skill, dict):
+            return None
+        args = skill.get("args")
+        if not isinstance(args, dict):
+            args = {}
+
+        properties: Dict[str, Any] = {}
+        required: List[str] = []
+        for param_name, param_info in args.items():
+            if not isinstance(param_name, str) or param_name == "self":
+                continue
+            info = param_info if isinstance(param_info, dict) else {}
+            schema = self._json_schema_for_type_hint(info.get("type"))
+            description_parts: List[str] = []
+            if info.get("description"):
+                description_parts.append(str(info.get("description")))
+            if info.get("default") not in (None, ""):
+                description_parts.append(f"default={info.get('default')}")
+            if description_parts:
+                schema["description"] = "; ".join(description_parts)[:500]
+            properties[param_name] = schema
+            if info.get("required") is True:
+                required.append(param_name)
+
+        description = str(skill.get("description") or "").split("\n")[0].strip()
+        if description:
+            description = description[:500]
+        else:
+            description = f"Add a planning step using the registered Blender skill {skill_name}."
+
+        return {
+            "type": "function",
+            "function": {
+                "name": skill_name,
+                "description": (
+                    "Planning-only Blender skill step. Calling this tool records a "
+                    f"plan step; it is not executed during LLM planning. {description}"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
+    def _schema_card_priority_order(
+        self,
+        skills_to_include: List[str],
+        *,
+        priority_only: bool,
+    ) -> List[str]:
+        if not priority_only:
+            return list(skills_to_include)
+
+        configured = self._model_config.get(
+            "schema_card_priority_skills",
+            self.planning_context.get("schema_card_priority_skills"),
+        )
+        if isinstance(configured, str):
+            priority_skills = [item.strip() for item in configured.split(",") if item.strip()]
+        elif isinstance(configured, list):
+            priority_skills = [str(item) for item in configured if str(item).strip()]
+        else:
+            priority_skills = list(self._DEFAULT_SCHEMA_CARD_PRIORITY_SKILLS)
+
+        retained = set(skills_to_include)
+        ordered: List[str] = []
+        for skill_name in priority_skills:
+            if skill_name in retained and skill_name not in ordered:
+                ordered.append(skill_name)
+        for skill_name in skills_to_include:
+            if skill_name not in ordered:
+                ordered.append(skill_name)
+        return ordered
+
+    def _build_schema_cards(
+        self,
+        skills_to_include: List[str],
+        max_cards: int = 12,
+        *,
+        priority_only: bool = False,
+    ) -> str:
         include_all = bool(
-            self.planning_context.get("include_compact_schema_for_required", False)
-            or self.planning_context.get("include_compact_schema_for_high_risk", False)
-            or self.planning_context.get("include_compact_schema_for_all_retained_skills", False)
+            self.planning_context.get("include_compact_schema_for_all_retained_skills", False)
+            or (
+                not priority_only
+                and (
+                    self.planning_context.get("include_compact_schema_for_required", False)
+                    or self.planning_context.get("include_compact_schema_for_high_risk", False)
+                )
+            )
         )
         if include_all:
             max_cards = len(skills_to_include)
 
         cards: List[str] = []
-        for skill_name in skills_to_include[:max_cards]:
+        ordered_skills = self._schema_card_priority_order(
+            skills_to_include,
+            priority_only=priority_only,
+        )
+        for skill_name in ordered_skills[:max_cards]:
             skill = self.get_skill_full(skill_name) or {}
             args = skill.get("args")
             if not isinstance(args, dict):
@@ -336,11 +549,27 @@ class OpenAICompatAdapter(VBFModelAdapter):
 不要猜测不熟悉的技能参数，先调用 load_skill 了解清楚再生成计划。
 """
 
+        if self.use_function_calling and self._planning_skill_tools_enabled():
+            tool_instruction += """
+
+## Planning Skill Tools
+Registered Blender skills may also be exposed as planning-only tools for this
+request. Calling one of those skill tools does NOT execute Blender immediately;
+VBF converts the tool call into a normal JSON plan step, then validates and
+executes it through the feedback/rollback/resume pipeline. Use exact tool
+signatures when they are available. `load_skill` remains documentation-only."""
+
         schema_cards = ""
-        if not self.use_function_calling or not self._allow_tools:
+        schema_cards_enabled = bool(
+            self.planning_context.get("include_compact_schema_for_required", False)
+            or self.planning_context.get("include_compact_schema_for_high_risk", False)
+            or self.planning_context.get("include_compact_schema_for_all_retained_skills", False)
+        )
+        if schema_cards_enabled or not self.use_function_calling or not self._allow_tools:
             schema_cards = self._build_schema_cards(
                 skills_to_include,
                 max_cards=int(self._model_config.get("schema_cards_limit", 12)),
+                priority_only=bool(self.use_function_calling and self._allow_tools),
             )
 
         base_prompt = f"""You are VBF (Vibe-Blender-Flow), a professional Blender 3D modeling assistant.
@@ -350,7 +579,9 @@ class OpenAICompatAdapter(VBFModelAdapter):
 2. **Use only available skills** - Validate skill names against the defined list
 3. **Context references** - Use $ref to reference previous step results: {{"$ref": "step_001.data.object_name"}}
 4. **Parameters** - Required params must be provided; optional params use defaults
+4a. **Primitive enum** - `create_primitive.primitive_type` supports only "cube", "cylinder", "cone", or "sphere". Do not use unsupported primitives such as "torus"; approximate wheel/tire/ring forms with cylinders plus bevel/detail steps.
 5. **load_skill is NOT a Blender skill** - It is a documentation query tool only. Never use "load_skill" as the "skill" value in plan steps. Only use it via the function_calling tool to query skill documentation.
+5a. **Planning tool calls are plan steps** - If registered Blender skill tools are available, calling them is an alternate way to output plan steps. They are not executed during planning.
 6. **Parent-Child Constraint** - When creating accessories (buttons, holes, ports, camera lenses, etc.), use **set_parent** to attach them to the main body. Format: {{"child_name": {{"$ref": "step_xxx.data.object_name"}}, "parent_name": {{"$ref": "step_001.data.object_name"}}}}
 7. **No hardcoded object names in assembly** - For relationship skills like set_parent/constraints/material assignment, do not hardcode names like "CameraModule". Always reference names from prior step outputs via $ref.
 8. **Creation before reference** - Every referenced object must be created in an earlier step. If a child/parent object is not explicitly created earlier, add creation steps first.
@@ -455,8 +686,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
     def build_tools_for_llm(self) -> List[Dict[str, Any]]:
         """Build JSON Schema tool definitions for function calling.
 
-        This is the "trigger layer" - LLM uses these tools to load
-        skill details on demand (progressive disclosure).
+        The default documentation tool is load_skill(). During planning calls,
+        VBF may also expose selected registered Blender skill schemas as
+        planning-only tools; those tool calls are converted into plan steps
+        instead of being executed immediately.
 
         Returns:
             List of tool definitions matching OpenAI tool_calls format.
@@ -489,11 +722,17 @@ class OpenAICompatAdapter(VBFModelAdapter):
             }
         ]
 
+        for skill_name in self._planning_tool_skill_names_for_request():
+            tool = self._build_planning_skill_tool(skill_name)
+            if tool:
+                tools.append(tool)
+
         return tools
 
     def build_api_request(
         self, messages: List[Dict], stream: bool = False,
         tools: Optional[List[Dict]] = None,
+        protocol: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build API request body for OpenAI-compatible endpoint.
 
@@ -502,26 +741,17 @@ class OpenAICompatAdapter(VBFModelAdapter):
             stream: Whether to request streaming response
             tools: Optional list of tool definitions for function calling
         """
-        request: Dict[str, Any] = {
-            "model": self.default_model,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-
-        # Add tools for function calling (progressive disclosure)
-        if tools:
-            request["tools"] = tools
-            request["tool_choice"] = "auto"
-
-        # Add response_format when configured; streaming compatibility is probed separately.
-        if self.response_format.get("type") == "json_object":
-            request["response_format"] = {"type": "json_object"}
-
-        # Add streaming flag if supported
-        if stream and self.supports_streaming:
-            request["stream"] = True
-
-        return request
+        effective_protocol = normalize_api_protocol(protocol or self.api_protocol)
+        return build_protocol_request(
+            protocol=effective_protocol,
+            model=self.default_model,
+            messages=messages,
+            temperature=self.temperature,
+            tools=tools,
+            json_object=self.response_format.get("type") == "json_object",
+            stream=bool(stream and self.supports_streaming),
+            proxy_compatibility_mode=self.enable_proxy_compatibility_mode,
+        )
 
     def _persist_compat_mode(self) -> None:
         cached = dict(self._COMPAT_MODE_CACHE.get(self._compat_mode_key, {}))
@@ -596,7 +826,9 @@ class OpenAICompatAdapter(VBFModelAdapter):
         allow_json_object = bool(self._allow_json_object)
         client = None
         timeout_seconds = self._probe_timeout_seconds()
-        if not self.use_curl_http_compat:
+        effective_protocol = self.api_protocol
+        use_http_protocol = self.use_curl_http_compat or effective_protocol != "chat"
+        if not use_http_protocol:
             client = openai_cls(
                 api_key=self.api_key,
                 base_url=self.base_url,
@@ -614,7 +846,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         allow_json_object=allow_json_object,
                     )
                     try:
-                        if self.use_curl_http_compat:
+                        if use_http_protocol:
                             response = self._post_chat_completions_http(
                                 request_body,
                                 timeout_seconds=timeout_seconds,
@@ -635,7 +867,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         print(f"[VBF] planning_capability_probe skipped: {e}")
                         break
 
-                    if self._is_empty_chunk_payload(response):
+                    if self._is_empty_chunk_payload(response) or (
+                        isinstance(response, VBFLLMResponse)
+                        and self._is_empty_internal_response(response)
+                    ):
                         if allow_tools:
                             allow_tools = False
                             self._allow_tools = False
@@ -657,7 +892,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
                     stream=True,
                 )
                 try:
-                    if self.use_curl_http_compat:
+                    if use_http_protocol:
                         response = self._post_chat_completions_http_stream(
                             request_body,
                             timeout_seconds=timeout_seconds,
@@ -673,7 +908,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
                     self._persist_compat_mode()
                     print(f"[VBF] streaming_probe result=fail reason={type(e).__name__}", flush=True)
                 else:
-                    if self._is_empty_chunk_payload(response):
+                    if self._is_empty_chunk_payload(response) or (
+                        isinstance(response, VBFLLMResponse)
+                        and self._is_empty_internal_response(response)
+                    ):
                         self._allow_streaming = False
                         self._persist_compat_mode()
                         print("[VBF] streaming_probe result=fail reason=empty_chunk", flush=True)
@@ -691,11 +929,18 @@ class OpenAICompatAdapter(VBFModelAdapter):
         allow_tools: bool,
         allow_json_object: bool,
         stream: bool = False,
+        protocol: Optional[str] = None,
     ) -> Dict[str, Any]:
         effective_tools = tools if allow_tools else None
-        request = self.build_api_request(messages, stream=stream, tools=effective_tools)
+        request = self.build_api_request(
+            messages,
+            stream=stream,
+            tools=effective_tools,
+            protocol=protocol,
+        )
         if not allow_json_object:
             request.pop("response_format", None)
+            request.pop("text", None)
         return request
 
     @staticmethod
@@ -703,14 +948,15 @@ class OpenAICompatAdapter(VBFModelAdapter):
         error: Exception, request_body: Dict[str, Any]
     ) -> bool:
         """Detect providers that reject `response_format=json_object`."""
-        if "response_format" not in request_body:
+        if "response_format" not in request_body and "text" not in request_body:
             return False
         msg = f"{getattr(error, 'message', '')} {error}".lower()
         return (
-            "response_format" in msg
+            ("response_format" in msg or "json_object" in msg or "json_schema" in msg or "text.format" in msg)
             and (
                 "json_object" in msg
                 or "json_schema" in msg
+                or "text.format" in msg
                 or "must be" in msg
                 or "invalid" in msg
             )
@@ -740,8 +986,10 @@ class OpenAICompatAdapter(VBFModelAdapter):
             return
         print(
             "[VBF] LLM request mode: "
+            f"protocol={self.api_protocol}, "
             f"model={self.default_model}, "
-            f"tools={'on' if self._allow_tools else 'off'}, "
+            f"doc_tools={'on' if self._allow_tools else 'off'}, "
+            f"planning_tools={len(self._planning_tool_skill_names_for_request()) if self._allow_tools else 0}, "
             f"json_object={'on' if self._allow_json_object else 'off'}",
             f"stream={'on' if self._allow_streaming else 'off'}",
             flush=True,
@@ -756,6 +1004,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
         skills_subset: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Format messages for OpenAI-compatible API."""
+        self._active_skills_subset = list(skills_subset) if skills_subset else None
         messages = [{"role": "system", "content": self.build_system_prompt(skills_subset=skills_subset)}]
 
         if context:
@@ -896,14 +1145,8 @@ class OpenAICompatAdapter(VBFModelAdapter):
     def parse_response(self, response: Any) -> Dict[str, Any]:
         """Parse OpenAI-compatible API response to VBF plan.
 
-        Handles both:
-        1. Direct JSON content (text response from LLM)
-        2. Tool calls (intermediate - returns list for caller to handle)
+        Handles direct JSON content from the normalized VBF LLM response.
         """
-        # If response is a list of tool results, return them for caller
-        if isinstance(response, list):
-            return {"tool_results": response}
-
         # Extract content using configured path
         content = self._extract_content(response)
 
@@ -950,6 +1193,9 @@ class OpenAICompatAdapter(VBFModelAdapter):
 
     def _extract_content(self, response: Any) -> Optional[str]:
         """Extract message content from API response using configurable path."""
+        if isinstance(response, VBFLLMResponse):
+            return response.content
+
         if isinstance(response, str):
             return response
 
@@ -964,6 +1210,9 @@ class OpenAICompatAdapter(VBFModelAdapter):
         # Fallback
         common_paths = [
             "choices[0].message.content",
+            "output_text",
+            "output[0].content[0].text",
+            "content[0].text",
             "data.choices[0].content",
             "result",
             "content",
@@ -981,15 +1230,32 @@ class OpenAICompatAdapter(VBFModelAdapter):
         """Get authentication headers for API requests."""
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            auth_scheme = self.auth_scheme
+            if auth_scheme == "auto":
+                auth_scheme = "x-api-key" if self.api_protocol == "claude_responses" else "bearer"
+            if auth_scheme == "x-api-key":
+                headers["x-api-key"] = self.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
     def _build_standard_http_headers(self) -> Dict[str, str]:
         headers = self.get_auth_headers()
         headers["Accept"] = "application/json"
+        if self.api_protocol == "claude_responses":
+            headers.setdefault("anthropic-version", "2023-06-01")
         if self.request_headers:
             headers.update(self.request_headers)
         return headers
+
+    def _endpoint_path(self) -> str:
+        return self._endpoint_path_for_protocol(self.api_protocol)
+
+    def _endpoint_path_for_protocol(self, protocol: Optional[str] = None) -> str:
+        protocol = normalize_api_protocol(protocol or self.api_protocol)
+        if protocol in {"openai_responses", "claude_responses"}:
+            return str(self.responses_path or "/responses")
+        return str(self.chat_completions_path or "/chat/completions")
 
     @staticmethod
     def _extract_error_message_from_http_response(response: Any) -> str:
@@ -1012,36 +1278,6 @@ class OpenAICompatAdapter(VBFModelAdapter):
             if message:
                 return str(message)
         return str(payload)
-
-    @staticmethod
-    def _get_choices(payload: Any) -> Any:
-        if isinstance(payload, dict):
-            return payload.get("choices")
-        return getattr(payload, "choices", None)
-
-    @staticmethod
-    def _get_choice_message(choice: Any) -> Any:
-        if isinstance(choice, dict):
-            return choice.get("message")
-        return getattr(choice, "message", None)
-
-    @staticmethod
-    def _get_choice_finish_reason(choice: Any) -> Any:
-        if isinstance(choice, dict):
-            return choice.get("finish_reason")
-        return getattr(choice, "finish_reason", None)
-
-    @staticmethod
-    def _get_message_content(message: Any) -> Any:
-        if isinstance(message, dict):
-            return message.get("content")
-        return getattr(message, "content", None)
-
-    @staticmethod
-    def _get_message_tool_calls(message: Any) -> Any:
-        if isinstance(message, dict):
-            return message.get("tool_calls")
-        return getattr(message, "tool_calls", None)
 
     def _request_timeout_seconds(self) -> float:
         """Use a slightly shorter transport timeout than the outer throttle."""
@@ -1076,7 +1312,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
         timeout_seconds: float,
         attempt: int,
     ) -> None:
-        messages = request_body.get("messages", [])
+        messages = request_body.get("messages", request_body.get("input", []))
         message_count = len(messages) if isinstance(messages, list) else 0
         char_count = (
             self._message_content_char_count(messages)
@@ -1088,8 +1324,8 @@ class OpenAICompatAdapter(VBFModelAdapter):
             f"attempt={attempt} "
             f"messages={message_count} "
             f"message_chars={char_count} "
-            f"tools={'on' if 'tools' in request_body else 'off'} "
-            f"json_object={'on' if 'response_format' in request_body else 'off'} "
+            f"doc_tools={'on' if 'tools' in request_body else 'off'} "
+            f"json_object={'on' if 'response_format' in request_body or 'text' in request_body else 'off'} "
             f"stream={'on' if request_body.get('stream') else 'off'} "
             f"timeout={timeout_seconds:.1f}s",
             flush=True,
@@ -1099,10 +1335,14 @@ class OpenAICompatAdapter(VBFModelAdapter):
         self,
         request_body: Dict[str, Any],
         timeout_seconds: Optional[float] = None,
+        protocol: Optional[str] = None,
     ) -> Any:
         import httpx
 
-        url = _build_chat_completions_url(self.base_url, self.chat_completions_path)
+        url = _build_chat_completions_url(
+            self.base_url,
+            self._endpoint_path_for_protocol(protocol),
+        )
         try:
             with httpx.Client(timeout=timeout_seconds or self.http_timeout_seconds) as client:
                 response = client.post(
@@ -1170,17 +1410,72 @@ class OpenAICompatAdapter(VBFModelAdapter):
                 f"elapsed={time.time() - start:.1f}s",
                 flush=True,
             )
-        return aggregator.to_chat_completion()
+        return chat_completion_to_internal("chat", aggregator.to_chat_completion())
+
+    def _aggregate_endpoint_streaming_response(
+        self,
+        chunks: Any,
+        log_progress: bool = True,
+        protocol: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        aggregator = EndpointStreamingAggregator(
+            normalize_api_protocol(protocol or self.api_protocol)
+        )
+        start = time.time()
+        first_chunk_logged = False
+        last_progress = start
+
+        for chunk in chunks:
+            if not first_chunk_logged:
+                first_chunk_logged = True
+                if log_progress:
+                    first_chunk_ms = int((time.time() - start) * 1000)
+                    print(f"[VBF] stream_started first_chunk_ms={first_chunk_ms}", flush=True)
+
+            aggregator.add_chunk(chunk)
+            if log_progress:
+                now = time.time()
+                if now - last_progress >= 30.0:
+                    stats = aggregator.stats()
+                    print(
+                        "[VBF] stream_progress "
+                        f"chunks={stats['chunks']} "
+                        f"content_chars={stats['content_chars']} "
+                        f"tool_arg_chars={stats['tool_arg_chars']} "
+                        f"elapsed={now - start:.1f}s",
+                        flush=True,
+                    )
+                    last_progress = now
+
+        if not first_chunk_logged:
+            raise RuntimeError("stream returned no chunks")
+
+        stats = aggregator.stats()
+        if log_progress:
+            print(
+                "[VBF] stream_completed "
+                f"chunks={stats['chunks']} "
+                f"content_chars={stats['content_chars']} "
+                f"tool_calls={stats['tool_calls']} "
+                f"elapsed={time.time() - start:.1f}s",
+                flush=True,
+            )
+        return aggregator.to_internal_response()
 
     def _post_chat_completions_http_stream(
         self,
         request_body: Dict[str, Any],
         timeout_seconds: Optional[float] = None,
         log_progress: bool = True,
+        protocol: Optional[str] = None,
     ) -> Any:
         import httpx
 
-        url = _build_chat_completions_url(self.base_url, self.chat_completions_path)
+        effective_protocol = normalize_api_protocol(protocol or self.api_protocol)
+        url = _build_chat_completions_url(
+            self.base_url,
+            self._endpoint_path_for_protocol(effective_protocol),
+        )
         try:
             with httpx.Client(timeout=timeout_seconds or self.http_timeout_seconds) as client:
                 with client.stream(
@@ -1190,9 +1485,15 @@ class OpenAICompatAdapter(VBFModelAdapter):
                     json=request_body,
                 ) as response:
                     response.raise_for_status()
-                    return self._aggregate_streaming_response(
-                        iter_sse_json_chunks(response.iter_lines()),
+                    if effective_protocol == "chat":
+                        return self._aggregate_streaming_response(
+                            iter_sse_json_chunks(response.iter_lines()),
+                            log_progress=log_progress,
+                        )
+                    return self._aggregate_endpoint_streaming_response(
+                        iter_endpoint_sse_json_chunks(response.iter_lines()),
                         log_progress=log_progress,
+                        protocol=effective_protocol,
                     )
         except httpx.TimeoutException as e:
             raise TimeoutError("LLM stream timed out") from e
@@ -1201,6 +1502,240 @@ class OpenAICompatAdapter(VBFModelAdapter):
         except httpx.HTTPStatusError as e:
             message = self._extract_error_message_from_http_response(e.response) or str(e)
             raise self._CompatHTTPError(e.response.status_code, message) from e
+
+    def _normalize_provider_response(
+        self,
+        protocol: str,
+        response: Any,
+    ) -> VBFLLMResponse:
+        if isinstance(response, VBFLLMResponse):
+            return response
+
+        if isinstance(response, str):
+            raw = response.strip()
+            if raw.startswith("{") or raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    return content_to_internal(response, protocol=protocol, raw=response)
+                if isinstance(parsed, dict) and "choices" in parsed:
+                    return chat_completion_to_internal(protocol, parsed)
+                if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
+                    return content_to_internal(
+                        json.dumps(parsed, ensure_ascii=False),
+                        protocol=protocol,
+                        raw=response,
+                    )
+                if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
+                    return content_to_internal(
+                        json.dumps({"steps": parsed}, ensure_ascii=False),
+                        protocol=protocol,
+                        raw=response,
+                    )
+            return content_to_internal(response, protocol=protocol, raw=response)
+
+        if isinstance(response, dict) and isinstance(response.get("steps"), list):
+            return content_to_internal(
+                json.dumps(response, ensure_ascii=False),
+                protocol=protocol,
+                raw=response,
+            )
+
+        if protocol != "chat":
+            return endpoint_response_to_internal(protocol, response)
+
+        normalized = chat_completion_to_internal(protocol, response)
+        if not normalized.content and not normalized.tool_calls and isinstance(response, dict):
+            extracted = self._extract_content(response)
+            if extracted:
+                return content_to_internal(
+                    extracted,
+                    protocol=protocol,
+                    raw=response,
+                    finish_reason=normalized.finish_reason,
+                    response_id=normalized.response_id,
+                )
+        return normalized
+
+    @staticmethod
+    def _is_empty_internal_response(response: VBFLLMResponse) -> bool:
+        return not response.content and not response.tool_calls
+
+    @staticmethod
+    def _is_empty_responses_output(response: VBFLLMResponse) -> bool:
+        """Detect Responses API completions that spent tokens but returned output=[]."""
+        if response.protocol != "openai_responses" or not isinstance(response.raw, dict):
+            return False
+        raw = response.raw
+        if raw.get("output") != []:
+            return False
+        usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+        output_tokens = usage.get("output_tokens")
+        details = (
+            usage.get("output_tokens_details")
+            if isinstance(usage.get("output_tokens_details"), dict)
+            else {}
+        )
+        reasoning_tokens = details.get("reasoning_tokens")
+        try:
+            return int(output_tokens or 0) > 0 or int(reasoning_tokens or 0) > 0
+        except Exception:
+            return bool(output_tokens or reasoning_tokens)
+
+    @staticmethod
+    def _build_tool_budget_exhaustion_messages(
+        current_messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build a compact tools-off retry prompt from accumulated tool history."""
+        source_messages = [msg for msg in current_messages if isinstance(msg, dict)]
+        user_messages = [
+            str(msg.get("content", ""))
+            for msg in source_messages
+            if msg.get("role") == "user" and str(msg.get("content", "")).strip()
+        ]
+        system_messages = [
+            str(msg.get("content", ""))
+            for msg in source_messages
+            if msg.get("role") == "system" and str(msg.get("content", "")).strip()
+        ]
+        tool_summaries: List[Dict[str, Any]] = []
+        for msg in source_messages:
+            if msg.get("role") != "tool":
+                continue
+            try:
+                payload = json.loads(str(msg.get("content") or "{}"))
+            except Exception:
+                payload = {"raw": str(msg.get("content", ""))[:500]}
+            tool_summaries.append(
+                {
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "skill_name": payload.get("skill_name"),
+                    "required": payload.get("required"),
+                    "parameters": list((payload.get("parameters") or {}).keys())[:20]
+                    if isinstance(payload.get("parameters"), dict)
+                    else [],
+                }
+            )
+
+        retry_messages: List[Dict[str, Any]] = []
+        if system_messages:
+            retry_messages.append({"role": "system", "content": system_messages[0][:4000]})
+        retry_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    (user_messages[-1] if user_messages else "")[:16000]
+                    + "\n\nCOMPACT LOADED SKILL SUMMARY:\n"
+                    + json.dumps(tool_summaries[-24:], ensure_ascii=False)
+                ),
+            }
+        )
+        retry_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "The local load_skill tool budget for this planning call is exhausted. "
+                    "Tools are now disabled. Return one final executable VBF plan JSON "
+                    "with a non-empty `steps` array. Use only registered skill names and "
+                    "exact registered argument names from the compact loaded skill summary. "
+                    "Keep the plan concise and do not include explanations."
+                ),
+            }
+        )
+        return retry_messages
+
+    @staticmethod
+    def _messages_contain_tool_history(messages: List[Dict[str, Any]]) -> bool:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "tool":
+                return True
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                return True
+        return False
+
+    @staticmethod
+    def _messages_contain_compact_tool_retry(messages: List[Dict[str, Any]]) -> bool:
+        return any(
+            isinstance(message, dict)
+            and "COMPACT LOADED SKILL SUMMARY" in str(message.get("content", ""))
+            for message in messages
+        )
+
+    def _record_empty_provider_response(
+        self,
+        *,
+        reason: str,
+        protocol: str,
+        request_body: Dict[str, Any],
+        response: Any,
+    ) -> None:
+        """Persist raw empty-provider responses for postmortem diagnostics."""
+        recorder = getattr(self.client, "_record_plan_shape_failure", None)
+        if not callable(recorder):
+            return
+        raw_response = response.raw if isinstance(response, VBFLLMResponse) else response
+        payload = {
+            "reason": reason,
+            "protocol": protocol,
+            "request": {
+                "messages": len(request_body.get("messages", request_body.get("input", [])))
+                if isinstance(request_body.get("messages", request_body.get("input", [])), list)
+                else 0,
+                "tools": "tools" in request_body,
+                "json_object": "response_format" in request_body or "text" in request_body,
+                "stream": bool(request_body.get("stream")),
+            },
+            "response_type": type(raw_response).__name__,
+            "response": raw_response,
+        }
+        if isinstance(response, VBFLLMResponse):
+            payload["internal_response"] = {
+                "content_chars": len(response.content or ""),
+                "tool_calls": len(response.tool_calls),
+                "finish_reason": response.finish_reason,
+                "response_id": response.response_id,
+                "protocol": response.protocol,
+            }
+        try:
+            recorder(
+                f"LLM returned empty response ({reason})",
+                payload,
+                stage="llm_empty_response",
+            )
+        except Exception:
+            pass
+
+    def _is_planning_skill_tool_call(self, tool_name: str) -> bool:
+        return (
+            isinstance(tool_name, str)
+            and tool_name != "load_skill"
+            and self._planning_skill_tools_enabled()
+            and self.validate_skill(tool_name)
+        )
+
+    def _planning_tool_calls_to_plan(self, tool_calls: List[Any]) -> Dict[str, Any]:
+        steps: List[Dict[str, Any]] = []
+        for index, tool_call in enumerate(tool_calls, start=1):
+            args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+            steps.append(
+                {
+                    "step_id": f"{index:03d}",
+                    "skill": tool_call.name,
+                    "args": args,
+                }
+            )
+        return {
+            "vbf_version": "2.1",
+            "plan_type": "skills_plan",
+            "steps": steps,
+            "metadata": {
+                "planning_tool_calls": True,
+                "planning_tool_step_count": len(steps),
+            },
+        }
 
     async def call_llm(self, messages: List[Dict]) -> Dict[str, Any]:
         """Send messages to LLM with function-calling support.
@@ -1226,14 +1761,16 @@ class OpenAICompatAdapter(VBFModelAdapter):
 
         await asyncio.to_thread(self._maybe_probe_compatibility_sync, OpenAI)
         tools = self.build_tools_for_llm() if self.use_function_calling else None
-        max_tool_calls = 10
+        max_tool_calls = max(1, int(self._model_config.get("max_tool_calls", 40)))
         self._log_compat_mode_once()
 
         def _sync_http_call(req_messages: List[Dict], req_tools: Optional[List[Dict]]) -> Any:
             """Synchronous HTTP call (runs in thread pool)."""
             client = None
             request_timeout_seconds = self._request_timeout_seconds()
-            if not self.use_curl_http_compat:
+            effective_protocol = self.api_protocol
+            use_http_protocol = self.use_curl_http_compat or effective_protocol != "chat"
+            if not use_http_protocol:
                 client = OpenAI(
                     api_key=self.api_key,
                     base_url=self.base_url,
@@ -1245,8 +1782,16 @@ class OpenAICompatAdapter(VBFModelAdapter):
             allow_streaming = bool(
                 self.use_streaming and self.supports_streaming and self._allow_streaming
             )
-            max_attempts = 4
+            max_attempts = 7
+            max_empty_same_mode_retries = 2
+            max_transport_same_mode_retries = 2
+            empty_same_mode_retries = 0
+            transport_same_mode_retries = 0
+            timeout_same_mode_retries = 0
             tools_off_cards = ""
+            compact_tools_off_messages: Optional[List[Dict[str, Any]]] = None
+            has_tool_history = self._messages_contain_tool_history(req_messages)
+            has_compact_tool_retry = self._messages_contain_compact_tool_retry(req_messages)
             has_tools_off_cards = any(
                 isinstance(msg, dict)
                 and msg.get("role") == "system"
@@ -1260,6 +1805,12 @@ class OpenAICompatAdapter(VBFModelAdapter):
             for attempt in range(max_attempts):
                 request_messages = req_messages
                 if not allow_tools:
+                    if has_tool_history and not has_compact_tool_retry:
+                        if compact_tools_off_messages is None:
+                            compact_tools_off_messages = self._build_tool_budget_exhaustion_messages(
+                                req_messages
+                            )
+                        request_messages = compact_tools_off_messages
                     if not tools_off_cards and not has_tools_off_cards:
                         tools_off_cards = self._build_schema_cards(
                             self._get_skills_for_prompt(),
@@ -1275,6 +1826,7 @@ class OpenAICompatAdapter(VBFModelAdapter):
                     allow_tools=allow_tools,
                     allow_json_object=allow_json_object,
                     stream=allow_streaming,
+                    protocol=effective_protocol,
                 )
                 self._log_llm_request_payload(
                     request_body,
@@ -1283,16 +1835,18 @@ class OpenAICompatAdapter(VBFModelAdapter):
                 )
 
                 try:
-                    if self.use_curl_http_compat:
+                    if use_http_protocol:
                         if allow_streaming:
                             resp = self._post_chat_completions_http_stream(
                                 request_body,
                                 timeout_seconds=request_timeout_seconds,
+                                protocol=effective_protocol,
                             )
                         else:
                             resp = self._post_chat_completions_http(
                                 request_body,
                                 timeout_seconds=request_timeout_seconds,
+                                protocol=effective_protocol,
                             )
                     else:
                         if allow_streaming:
@@ -1302,8 +1856,41 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         else:
                             resp = client.chat.completions.create(**request_body)
                 except Exception as e:
+                    if allow_streaming and isinstance(
+                        e, (APITimeoutError, TimeoutError, APIConnectionError, ConnectionError)
+                    ):
+                        if transport_same_mode_retries < max_transport_same_mode_retries:
+                            if has_tool_history and allow_tools:
+                                allow_streaming = False
+                                allow_tools = False
+                                if allow_json_object:
+                                    allow_json_object = False
+                                transport_same_mode_retries = 0
+                                print(
+                                    "[VBF] fallback_mode=tool_result_timeout_compact_tools_off_retry "
+                                    f"reason={type(e).__name__}",
+                                    flush=True,
+                                )
+                                continue
+                            transport_same_mode_retries += 1
+                            time.sleep(min(2.0, 0.5 * transport_same_mode_retries))
+                            print(
+                                "[VBF] fallback_mode=stream_transport_retry_same_mode "
+                                f"reason={type(e).__name__} retry={transport_same_mode_retries}",
+                                flush=True,
+                            )
+                            continue
+                        allow_streaming = False
+                        transport_same_mode_retries = 0
+                        print(
+                            "[VBF] fallback_mode=disable_streaming_retry_nonstream "
+                            f"reason={type(e).__name__}",
+                            flush=True,
+                        )
+                        continue
                     if allow_streaming:
                         allow_streaming = False
+                        transport_same_mode_retries = 0
                         print(
                             "[VBF] fallback_mode=disable_streaming_retry_nonstream "
                             f"reason={type(e).__name__}",
@@ -1311,12 +1898,30 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         )
                         continue
                     if isinstance(e, (APITimeoutError, TimeoutError)):
+                        if timeout_same_mode_retries < 1:
+                            timeout_same_mode_retries += 1
+                            print(
+                                "[VBF] fallback_mode=timeout_retry_same_mode "
+                                f"retry={timeout_same_mode_retries}",
+                                flush=True,
+                            )
+                            continue
                         if allow_tools:
                             allow_tools = False
-                            print("[VBF] fallback_mode=timeout_disable_tools_retry_once", flush=True)
+                            timeout_same_mode_retries = 0
+                            print("[VBF] fallback_mode=timeout_local_disable_tools_retry", flush=True)
                             continue
                         raise TimeoutError("LLM call timed out") from e
-                    if isinstance(e, APIConnectionError):
+                    if isinstance(e, (APIConnectionError, ConnectionError)):
+                        if transport_same_mode_retries < max_transport_same_mode_retries:
+                            transport_same_mode_retries += 1
+                            time.sleep(min(2.0, 0.5 * transport_same_mode_retries))
+                            print(
+                                "[VBF] fallback_mode=transport_retry_same_mode "
+                                f"reason={type(e).__name__} retry={transport_same_mode_retries}",
+                                flush=True,
+                            )
+                            continue
                         raise ConnectionError(f"LLM connection failed: {e}") from e
                     if isinstance(e, APIError):
                         if self._should_retry_without_response_format(e, request_body) and allow_json_object:
@@ -1348,221 +1953,173 @@ class OpenAICompatAdapter(VBFModelAdapter):
                         raise RuntimeError(f"LLM API error ({e.status_code}): {e.message}") from e
                     raise
 
-                # Some gateways return empty chunk payloads with no choices/content.
-                # Treat this as a compatibility issue and progressively downgrade.
                 if self._is_empty_chunk_payload(resp):
+                    self._record_empty_provider_response(
+                        reason="empty_chunk_payload",
+                        protocol=effective_protocol,
+                        request_body=request_body,
+                        response=resp,
+                    )
+                    force_mode_change = has_tool_history or effective_protocol == "openai_responses"
+                    if (
+                        not force_mode_change
+                        and empty_same_mode_retries < max_empty_same_mode_retries
+                    ):
+                        empty_same_mode_retries += 1
+                        print(
+                            "[VBF] fallback_mode=empty_chunk_retry_same_mode "
+                            f"retry={empty_same_mode_retries}",
+                            flush=True,
+                        )
+                        continue
+                    empty_same_mode_retries = 0
                     if allow_tools:
                         allow_tools = False
-                        self._allow_tools = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=empty_chunk_disable_tools_retry")
+                        if force_mode_change and allow_json_object:
+                            allow_json_object = False
+                        print("[VBF] fallback_mode=empty_chunk_local_disable_tools_retry")
                         continue
                     if allow_json_object:
                         allow_json_object = False
-                        self._allow_json_object = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=empty_chunk_disable_json_object_retry")
+                        print("[VBF] fallback_mode=empty_chunk_local_disable_json_object_retry")
                         continue
                     raise RuntimeError("LLM returned empty chunk payload with no choices")
 
-                # Some OpenAI-compatible gateways return plain text directly
-                # instead of a ChatCompletion object.
-                if isinstance(resp, str):
-                    raw = resp.strip()
-                    if raw.startswith("{") or raw.startswith("["):
-                        try:
-                            parsed = json.loads(raw)
-                            if self._is_empty_chunk_payload(parsed):
-                                if allow_tools:
-                                    allow_tools = False
-                                    self._allow_tools = False
-                                    self._persist_compat_mode()
-                                    print("[VBF] fallback_mode=empty_chunk_disable_tools_retry")
-                                    continue
-                                if allow_json_object:
-                                    allow_json_object = False
-                                    self._allow_json_object = False
-                                    self._persist_compat_mode()
-                                    print("[VBF] fallback_mode=empty_chunk_disable_json_object_retry")
-                                    continue
-                                raise RuntimeError("LLM returned empty chunk payload with no choices")
-                            if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
-                                return parsed
-                            if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
-                                return {"steps": parsed}
-                            return self.parse_response(parsed)
-                        except json.JSONDecodeError:
-                            pass
-                    return self.parse_response(resp)
-
-                # Some gateways return plain dict payloads instead of SDK
-                # response models; parse through the configured content path.
-                if isinstance(resp, dict) and isinstance(resp.get("steps"), list):
-                    return resp
-
-                choices = self._get_choices(resp)
-                if isinstance(resp, dict) and not isinstance(choices, list):
-                    return self.parse_response(resp)
-                if not isinstance(choices, list) or not choices:
-                    # Some providers return a ChatCompletion-like object but omit
-                    # `choices` in edge cases. Treat as compatibility downgrade.
-                    if allow_tools:
-                        allow_tools = False
-                        self._allow_tools = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=choice_missing_disable_tools_retry")
-                        continue
-                    if allow_json_object:
-                        allow_json_object = False
-                        self._allow_json_object = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=choice_missing_disable_json_object_retry")
-                        continue
-                    raise RuntimeError("LLM returned response without choices")
-
-                choice = choices[0]
-                if choice is None:
-                    if allow_tools:
-                        allow_tools = False
-                        self._allow_tools = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=choice_missing_disable_tools_retry")
-                        continue
-                    if allow_json_object:
-                        allow_json_object = False
-                        self._allow_json_object = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=choice_missing_disable_json_object_retry")
-                        continue
-                    raise RuntimeError("LLM returned empty choice payload")
-
-                finish_reason = self._get_choice_finish_reason(choice)
-                message = self._get_choice_message(choice)
-                if message is None:
-                    if allow_tools:
-                        allow_tools = False
-                        self._allow_tools = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=message_missing_disable_tools_retry")
-                        continue
-                    if allow_json_object:
-                        allow_json_object = False
-                        self._allow_json_object = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=message_missing_disable_json_object_retry")
-                        continue
-                    raise RuntimeError(
-                        f"LLM returned response with missing message (finish_reason={finish_reason})"
+                normalized = self._normalize_provider_response(effective_protocol, resp)
+                if self._is_empty_internal_response(normalized):
+                    empty_reason = (
+                        "empty_responses_output"
+                        if self._is_empty_responses_output(normalized)
+                        else "empty_internal_response"
                     )
-
-                # Handle function calling
-                tool_calls = self._get_message_tool_calls(message)
-                if tool_calls:
-                    tool_results = []
-                    for tc in tool_calls:
-                        if isinstance(tc, dict):
-                            function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-                            tool_name = str(function.get("name", ""))
-                            arguments = function.get("arguments")
-                            tool_call_id = str(tc.get("id", ""))
-                        else:
-                            function = getattr(tc, "function", None)
-                            tool_name = getattr(function, "name", "")
-                            arguments = getattr(function, "arguments", None)
-                            tool_call_id = getattr(tc, "id", "")
-
-                        try:
-                            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-                        except json.JSONDecodeError:
-                            args = {}
-
-                        # Execute tool (sync call, no RPC needed for skill metadata)
-                        if tool_name == "load_skill":
-                            result = self.load_skill(args.get("skill_name", ""))
-                        else:
-                            result = {"error": f"Unknown tool: {tool_name}"}
-
-                        tool_results.append({
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "args": args,
-                            "result": result,
-                        })
-
-                    return {
-                        "finish_reason": finish_reason,
-                        "tool_results": tool_results,
-                        "raw_message": message,
-                    }
-
-                # No tool calls - final response
-                content = self._get_message_content(message)
-                if content is None:
-                    # Some providers stop with empty content for larger prompt+tool payloads.
+                    self._record_empty_provider_response(
+                        reason=empty_reason,
+                        protocol=effective_protocol,
+                        request_body=request_body,
+                        response=normalized,
+                    )
+                    if empty_reason == "empty_responses_output" and effective_protocol == "openai_responses":
+                        effective_protocol = "chat"
+                        allow_streaming = False
+                        allow_json_object = False
+                        allow_tools = False
+                        empty_same_mode_retries = 0
+                        transport_same_mode_retries = 0
+                        print(
+                            "[VBF] fallback_mode=empty_responses_output_retry_chat_nonstream",
+                            flush=True,
+                        )
+                        continue
+                    force_mode_change = has_tool_history or effective_protocol == "openai_responses"
+                    if (
+                        not force_mode_change
+                        and empty_same_mode_retries < max_empty_same_mode_retries
+                    ):
+                        empty_same_mode_retries += 1
+                        print(
+                            "[VBF] fallback_mode=empty_response_retry_same_mode "
+                            f"retry={empty_same_mode_retries}",
+                            flush=True,
+                        )
+                        continue
+                    empty_same_mode_retries = 0
                     if allow_tools:
                         allow_tools = False
-                        self._allow_tools = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=empty_content_disable_tools_retry")
+                        if force_mode_change and allow_json_object:
+                            allow_json_object = False
+                        print("[VBF] fallback_mode=empty_response_local_disable_tools_retry")
                         continue
                     if allow_json_object:
                         allow_json_object = False
-                        self._allow_json_object = False
-                        self._persist_compat_mode()
-                        print("[VBF] fallback_mode=empty_content_disable_json_object_retry")
+                        print("[VBF] fallback_mode=empty_response_local_disable_json_object_retry")
                         continue
-                    raise RuntimeError(
-                        f"LLM returned empty content (finish_reason={finish_reason})"
-                    )
+                    raise RuntimeError("LLM returned empty response with no content or tool calls")
 
-                # Successful plain content path.
-                return self.parse_response({self.response_content_path: content})
+                if normalized.has_tool_calls():
+                    return normalized
+                return self.parse_response(normalized)
 
             raise RuntimeError("LLM provider returned no usable content after compatibility fallbacks")
 
         # Tool call loop
         current_messages = list(messages)  # Copy to avoid mutating original
         current_tools = tools
+        max_tool_only_rounds = max(
+            1,
+            int(self._model_config.get("max_consecutive_tool_only_rounds", 2)),
+        )
+        consecutive_tool_only_rounds = 0
 
         for iteration in range(max_tool_calls):
             response = await asyncio.to_thread(_sync_http_call, current_messages, current_tools)
 
-            # Handle tool calls
-            if "tool_results" in response:
-                tool_results = response["tool_results"]
-                raw_message = response["raw_message"]
+            if isinstance(response, VBFLLMResponse) and response.has_tool_calls():
+                planning_tool_calls = [
+                    tool_call
+                    for tool_call in response.tool_calls
+                    if self._is_planning_skill_tool_call(tool_call.name)
+                ]
+                if planning_tool_calls:
+                    print(
+                        "[VBF] planning_tool_calls_converted "
+                        f"steps={len(planning_tool_calls)}",
+                        flush=True,
+                    )
+                    return self._planning_tool_calls_to_plan(planning_tool_calls)
+
+                if response.content and str(response.content).strip():
+                    consecutive_tool_only_rounds = 0
+                else:
+                    consecutive_tool_only_rounds += 1
+                executed_tools = []
+                for tool_call in response.tool_calls:
+                    if tool_call.name == "load_skill":
+                        result = self.load_skill(tool_call.arguments.get("skill_name", ""))
+                    else:
+                        result = {"error": f"Unknown tool: {tool_call.name}"}
+                    executed_tools.append(
+                        {
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "args": tool_call.arguments,
+                            "result": result,
+                        }
+                    )
 
                 # Add assistant message with tool calls
-                assistant_content = self._get_message_content(raw_message)
-                if assistant_content is None:
-                    assistant_content = ""
                 current_messages.append({
                     "role": "assistant",
-                    "content": assistant_content,
+                    "content": response.content or "",
                     "tool_calls": [
-                        {
-                            "id": tr["tool_call_id"],
-                            "type": "function",
-                            "function": {
-                                "name": tr["tool_name"],
-                                "arguments": (
-                                    json.dumps(tr["args"], ensure_ascii=False)
-                                    if not isinstance(tr["args"], str)
-                                    else tr["args"]
-                                ),
-                            },
-                        }
-                        for tr in tool_results
+                        internal_tool_call_to_chat(tool_call)
+                        for tool_call in response.tool_calls
                     ],
                 })
 
                 # Add tool result messages
-                for tr in tool_results:
+                for tr in executed_tools:
                     current_messages.append({
                         "role": "tool",
                         "tool_call_id": tr["tool_call_id"],
                         "content": json.dumps(tr["result"], ensure_ascii=False, indent=2),
                     })
+
+                if consecutive_tool_only_rounds >= max_tool_only_rounds:
+                    print(
+                        "[VBF] fallback_mode=tool_only_loop_local_disable_tools_retry "
+                        f"rounds={consecutive_tool_only_rounds}",
+                        flush=True,
+                    )
+                    retry_messages = self._build_tool_budget_exhaustion_messages(current_messages)
+                    retry_response = await asyncio.to_thread(_sync_http_call, retry_messages, None)
+                    if (
+                        isinstance(retry_response, VBFLLMResponse)
+                        and retry_response.has_tool_calls()
+                    ):
+                        raise RuntimeError(
+                            "LLM stayed in a tool-calling loop after tools were disabled."
+                        )
+                    return retry_response
 
                 # Continue loop
                 continue
@@ -1571,7 +2128,16 @@ class OpenAICompatAdapter(VBFModelAdapter):
             return response
 
         # Max iterations exceeded
-        raise RuntimeError(
-            f"Max tool call iterations ({max_tool_calls}) exceeded. "
-            "LLM may be stuck in a tool-calling loop."
+        print(
+            "[VBF] fallback_mode=tool_budget_exhausted_final_retry "
+            f"iterations={max_tool_calls}",
+            flush=True,
         )
+        retry_messages = self._build_tool_budget_exhaustion_messages(current_messages)
+        response = await asyncio.to_thread(_sync_http_call, retry_messages, None)
+        if isinstance(response, VBFLLMResponse) and response.has_tool_calls():
+            raise RuntimeError(
+                f"Max tool call iterations ({max_tool_calls}) exceeded. "
+                "LLM may be stuck in a tool-calling loop."
+            )
+        return response

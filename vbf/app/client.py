@@ -33,6 +33,7 @@ from ..llm.rate_limiter import call_llm_with_throttle
 from ..core.plan_normalization import extract_skills_plan
 from ..core.task_state import TaskState, TaskInterruptedError
 from ..core.scene_state import SceneState, FeedbackContext
+from ..core.visual_inputs import attach_visual_inputs_to_messages
 from ..runtime.memory_manager import MemoryManager
 from ..runtime.run_logging import (
     append_run_event,
@@ -69,6 +70,7 @@ from .planning_context import (
     filter_skills_for_adaptive_stage,
     get_core_skills,
     get_planning_context,
+    get_planning_loop_config,
     get_planning_mode,
     get_requirement_assessment_config,
     global_safety_skills,
@@ -90,11 +92,13 @@ from .planning_context import (
 )
 from .planning_service import (
     assess_adaptive_stage_intent,
+    build_batched_stage_prompt,
     call_plan_with_format_retry,
     inject_scene_context,
     plan_skill_task,
     plan_skill_task_adaptive_staged,
     plan_skill_task_auto,
+    plan_next_batched_stage,
     plan_skill_task_two_stage,
     replan_from_step,
     request_replan,
@@ -155,10 +159,16 @@ class VBFClient:
             auto_cleanup=True,
         )
         self._adapter = None  # LLM adapter (lazy init via _ensure_adapter)
+        self._visual_inputs: List[Dict[str, Any]] = []
         self._capabilities_cache: Optional[Dict[str, Any]] = None
         self._capabilities_logged = False
+        self._cached_skill_names: Optional[List[str]] = None
 
     # --- LLM adapter helpers (v2 - replaces llm_integration.py) ---
+
+    def set_visual_inputs(self, visual_inputs: List[Dict[str, Any]]) -> None:
+        """Attach multimodal reference images to subsequent LLM calls."""
+        self._visual_inputs = [dict(item) for item in (visual_inputs or [])]
 
     def _is_llm_enabled(self) -> bool:
         """Check if LLM is configured."""
@@ -173,6 +183,51 @@ class VBFClient:
         """Load llm config section for adapter initialization."""
         llm_config = load_llm_section()
         return llm_config or None
+
+    def _get_execute_skill_timeout_seconds(self) -> float:
+        raw = os.getenv("VBF_EXECUTE_SKILL_TIMEOUT_SECONDS")
+        if raw is not None:
+            try:
+                return max(1.0, float(raw))
+            except Exception:
+                pass
+        try:
+            cfg = load_llm_section()
+            runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, dict) else {}
+            if isinstance(runtime_cfg, dict) and "execute_skill_timeout_seconds" in runtime_cfg:
+                return max(1.0, float(runtime_cfg["execute_skill_timeout_seconds"]))
+        except Exception:
+            pass
+        return 60.0
+
+    def _get_executor_ready_timeout_seconds(self) -> float:
+        raw = os.getenv("VBF_EXECUTOR_READY_TIMEOUT_SECONDS")
+        if raw is not None:
+            try:
+                return max(1.0, float(raw))
+            except Exception:
+                pass
+        try:
+            cfg = load_llm_section()
+            runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, dict) else {}
+            if isinstance(runtime_cfg, dict) and "executor_ready_timeout_seconds" in runtime_cfg:
+                return max(1.0, float(runtime_cfg["executor_ready_timeout_seconds"]))
+        except Exception:
+            pass
+        return 120.0
+
+    def _executor_backpressure_enabled(self) -> bool:
+        raw = os.getenv("VBF_EXECUTOR_BACKPRESSURE")
+        if raw is not None:
+            return raw.strip().lower() not in {"0", "false", "off", "no"}
+        try:
+            cfg = load_llm_section()
+            runtime_cfg = cfg.get("runtime", {}) if isinstance(cfg, dict) else {}
+            if isinstance(runtime_cfg, dict) and "executor_backpressure_enabled" in runtime_cfg:
+                return bool(runtime_cfg["executor_backpressure_enabled"])
+        except Exception:
+            pass
+        return True
 
     def _get_llm_model_name(self) -> str:
         """Determine which model key to use in get_adapter()."""
@@ -193,7 +248,7 @@ class VBFClient:
             return "ollama"
         return "default"
 
-    async def _ensure_adapter(self):
+    async def _ensure_adapter(self, load_skills: bool = True):
         """Get or create the LLM adapter (singleton per client).
 
         The adapter wraps OpenAICompatLLM with:
@@ -202,26 +257,48 @@ class VBFClient:
         - Unified error handling and JSON parsing
         """
         if self._adapter is not None:
+            if load_skills and not getattr(self._adapter, "initialized", False):
+                await self._adapter.init()
             return self._adapter
         config_override = self._load_adapter_config() or {}
         model_name = self._get_llm_model_name()
         adapter = get_adapter(model_name, client=self, config_override=config_override)
-        # init() loads skills from Blender via SkillRegistry (cached globally)
-        await adapter.init()
+        if load_skills:
+            # init() loads skills from Blender via SkillRegistry (cached globally)
+            await adapter.init()
         self._adapter = adapter
         return adapter
 
-    async def _adapter_call(self, messages: List[Dict]) -> Dict[str, Any]:
+    async def _adapter_call(
+        self,
+        messages: List[Dict],
+        *,
+        load_skills: bool = True,
+        allow_tools: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """Call LLM via adapter with rate limiting.
 
         adapter.call_llm() raises TimeoutError / ConnectionError on HTTP errors
         and returns error dicts on JSON parse failures. We convert error dicts
         to ValueError so the retry loop in run_task can detect them.
         """
-        adapter = await self._ensure_adapter()
+        if load_skills:
+            adapter = await self._ensure_adapter()
+        else:
+            adapter = await self._ensure_adapter(load_skills=False)
+        if self._visual_inputs:
+            messages = attach_visual_inputs_to_messages(messages, self._visual_inputs)
 
         async def _call():
-            response = await adapter.call_llm(messages)
+            restore_allow_tools = None
+            if allow_tools is not None and hasattr(adapter, "_allow_tools"):
+                restore_allow_tools = getattr(adapter, "_allow_tools")
+                adapter._allow_tools = bool(allow_tools)
+            try:
+                response = await adapter.call_llm(messages)
+            finally:
+                if restore_allow_tools is not None:
+                    adapter._allow_tools = restore_allow_tools
             if isinstance(response, dict) and "error" in response:
                 self._record_llm_parse_failure(response)
                 parse_stage = response.get("parse_stage", "unknown")
@@ -232,7 +309,7 @@ class VBFClient:
                 )
             return response
 
-        return await call_llm_with_throttle(_call)
+        return await call_llm_with_throttle(_call, hard_timeout=False)
 
     def _record_llm_parse_failure(self, payload: Dict[str, Any]) -> None:
         """Persist the latest parse failure with full context for debugging."""
@@ -323,11 +400,102 @@ class VBFClient:
                 await asyncio.sleep(0.5)
         raise TimeoutError(f"Unable to connect to Blender VBF WS") from last_err
 
+    async def _get_executor_status(self) -> Optional[Dict[str, Any]]:
+        try:
+            resp = await self._ws.call(method="vbf.executor_status", params={}, timeout_s=5.0)
+        except JsonRpcError as e:
+            if e.code == -32601:
+                return None
+            raise
+        if not isinstance(resp, dict):
+            return None
+        data = resp.get("data")
+        return data if isinstance(data, dict) else None
+
+    async def _request_executor_recovery(self, reason: str) -> None:
+        try:
+            await self._ws.call(
+                method="vbf.recover_executor",
+                params={"reason": reason},
+                timeout_s=5.0,
+            )
+        except JsonRpcError as e:
+            if e.code != -32601:
+                raise
+
+    async def _wait_for_executor_ready(self, skill: str, step_id: Optional[str]) -> None:
+        if not self._executor_backpressure_enabled():
+            return
+
+        deadline = asyncio.get_event_loop().time() + self._get_executor_ready_timeout_seconds()
+        recovery_attempted = False
+        last_status: Dict[str, Any] = {}
+
+        while True:
+            try:
+                status = await self._get_executor_status()
+            except Exception:
+                # Older addon builds may not expose executor health; do not block execution.
+                return
+            if not status:
+                return
+            last_status = status
+
+            queue_size = int(status.get("queue_size") or 0)
+            current_job = status.get("current_job")
+            last_poll_age = status.get("last_poll_age_s")
+            poll_stale = bool(status.get("poll_stale"))
+            if (
+                not poll_stale
+                and queue_size > 0
+                and not current_job
+                and isinstance(last_poll_age, (int, float))
+                and float(last_poll_age) > 5.0
+            ):
+                poll_stale = True
+
+            if poll_stale and queue_size > 0 and not current_job and not recovery_attempted:
+                recovery_attempted = True
+                try:
+                    await self._request_executor_recovery("client_backpressure_poll_stale")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.25)
+                continue
+
+            if queue_size <= 0 and not current_job:
+                return
+
+            if asyncio.get_event_loop().time() >= deadline:
+                detail = {
+                    "skill": skill,
+                    "step_id": step_id,
+                    "queue_size": queue_size,
+                    "current_job": current_job,
+                    "last_poll_age_s": last_poll_age,
+                }
+                raise TimeoutError(f"Blender executor was not ready before enqueue: {detail}")
+
+            await asyncio.sleep(0.25 if poll_stale else 0.5)
+
     async def execute_skill(self, skill: str, args: Optional[Dict] = None, step_id: Optional[str] = None) -> Dict:
-        return await self._ws.call(
-            method="vbf.execute_skill",
-            params={"skill": skill, "args": args or {}, "step_id": step_id},
-        )
+        timeout_s = self._get_execute_skill_timeout_seconds()
+        await self._wait_for_executor_ready(skill, step_id)
+        try:
+            return await self._ws.call(
+                method="vbf.execute_skill",
+                params={
+                    "skill": skill,
+                    "args": args or {},
+                    "step_id": step_id,
+                    "_vbf_queue_timeout_s": timeout_s,
+                },
+                timeout_s=timeout_s,
+            )
+        except JsonRpcError as e:
+            if e.code == -32098:
+                raise TimeoutError(str(e)) from e
+            raise
 
     async def list_skills(self) -> List[str]:
         resp = await self._ws.call(method="vbf.list_skills", params={})
@@ -335,7 +503,12 @@ class VBFClient:
             return []
         data = resp.get("data") or {}
         skills = data.get("skills") or []
-        return skills if isinstance(skills, list) else []
+        if not isinstance(skills, list):
+            return []
+        normalized = [str(skill) for skill in skills if str(skill)]
+        if normalized:
+            self._cached_skill_names = normalized
+        return normalized
 
     async def describe_skills(self, skill_names: List[str]) -> Optional[Dict[str, Any]]:
         try:
@@ -606,6 +779,9 @@ class VBFClient:
     def _get_planning_context(self) -> Dict[str, Any]:
         return get_planning_context(load_llm_section)
 
+    def _get_planning_loop_config(self) -> Dict[str, Any]:
+        return get_planning_loop_config(load_llm_section)
+
     @staticmethod
     def _default_requirement_assessment_config() -> Dict[str, Any]:
         return default_requirement_assessment_config()
@@ -624,12 +800,14 @@ class VBFClient:
     def _modeling_quality_contract() -> str:
         return """## Modeling Planning Contract
 - Complete workflow: blockout proportions -> separate components -> boolean/cutout helpers -> bevel/chamfer support -> topology cleanup -> normals/sharp edges -> hierarchy/origin cleanup.
-- Transform precision: every creation step must include explicit `name`, `size`/dimensions, `location`, and `rotation_euler` when orientation matters. Do not rely on defaults for production geometry.
-- Coordinate frame: keep one consistent world/local basis. For phone-like products, center the chassis near world origin, use one axis for length, one for width, one for thickness, and place all parts by relative offsets from the chassis.
+- Skill schema authority: for every step, the registered skill description, function name, and parameter signature are the source of truth. Use only arguments exposed by that exact skill signature; high-level modeling goals and this contract never authorize unsupported parameters.
+- Capability discovery: if no high-level registered skill satisfies an intent, use registered low-level gateway discovery only when those gateway skills are available. Search/introspect first, then invoke with the discovered real signature; never invent a new skill or parameter.
+- Transform precision: every creation step must include explicit identity, dimensions, and location using the exact parameter names supported by the selected skill. Include orientation only when that skill signature supports it; otherwise create the object in a supported form and use a registered transform skill afterward.
+- Coordinate frame: keep one consistent world/local basis. Use explicit primary axes for length, width, and height, and place all parts by relative offsets from the main assembly.
 - Scale hygiene: use realistic relative proportions, apply/freeze transforms when a later bevel, boolean, UV, or material operation depends on uniform scale.
 - Topology: prefer quad-friendly construction, avoid unnecessary triangles/ngons, keep edge loops around cutouts/fillets, remove doubles, fill holes, and recalculate outward normals before final cleanup.
 - Surface quality: bevel all real-world hard edges with explicit widths/segments, mark sharp/crease edges when available, and avoid absolute razor edges.
-- Object identity: use semantic names such as GEO_Phone_Chassis, GEO_Rear_Camera_Island, GEO_Lens_Ring_UL. Avoid generic Cube/Circle names.
+- Object identity: use semantic names such as GEO_Main_Body, GEO_Control_Root, GEO_Detail_Panel, GEO_Left_Wheel, or MAT_Primary_Surface. Avoid generic Cube/Circle names.
 - Relationships: create root/parent objects first, then parent child components with `$ref` from creation step outputs. Do not reference objects before creation.
 - Modifier stack: plan boolean helpers before boolean operations, bevel after major booleans, cleanup after destructive/apply operations. Delete helper cutters only after their operation succeeds.
 - Pivot/origin intent: root product origin should support alignment/animation; child origins should make sense for buttons, lenses, doors, hinges, or rotating parts.
@@ -723,13 +901,14 @@ class VBFClient:
         prompt: str,
         allowed_skills: List[str],
         size: int,
+        stage: Optional[str] = None,
     ) -> List[str]:
         return derive_capability_covered_skill_subset(
             adapter,
             prompt,
             allowed_skills,
             size,
-            stage=self._infer_planning_stage(prompt),
+            stage=stage or self._infer_planning_stage(prompt),
             context=self._get_planning_context(),
         )
 
@@ -747,13 +926,14 @@ class VBFClient:
         prompt: str,
         allowed_skills: List[str],
         size: int,
+        stage: Optional[str] = None,
     ) -> List[str]:
         return derive_skill_subset(
             adapter,
             prompt,
             allowed_skills,
             size,
-            stage=self._infer_planning_stage(prompt),
+            stage=stage or self._infer_planning_stage(prompt),
             context=self._get_planning_context(),
         )
 
@@ -897,6 +1077,26 @@ class VBFClient:
             self._modeling_quality_contract(),
         )
 
+    def _build_batched_stage_prompt(
+        self,
+        *,
+        prompt: str,
+        stage: str,
+        batch_index: int,
+        max_steps: int,
+        completed_summary: List[Dict[str, Any]],
+        pending_work: List[str],
+    ) -> str:
+        return build_batched_stage_prompt(
+            self,
+            prompt=prompt,
+            stage=stage,
+            batch_index=batch_index,
+            max_steps=max_steps,
+            completed_summary=completed_summary,
+            pending_work=pending_work,
+        )
+
     @staticmethod
     def _filter_skills_for_adaptive_stage(allowed_skills: List[str], stage: str) -> List[str]:
         return filter_skills_for_adaptive_stage(allowed_skills, stage)
@@ -924,6 +1124,26 @@ class VBFClient:
         save_path: str,
     ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         return await plan_skill_task_auto(self, prompt, allowed_skills, save_path)
+
+    async def _plan_next_batched_stage(
+        self,
+        *,
+        prompt: str,
+        allowed_skills: List[str],
+        save_path: str,
+        previous_plan: Dict[str, Any],
+        completed_summary: List[Dict[str, Any]],
+        pending_work: List[str],
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        return await plan_next_batched_stage(
+            self,
+            prompt=prompt,
+            allowed_skills=allowed_skills,
+            save_path=save_path,
+            previous_plan=previous_plan,
+            completed_summary=completed_summary,
+            pending_work=pending_work,
+        )
 
     @staticmethod
     def _scene_to_prompt_text(scene: SceneState, max_objects: Optional[int] = None) -> str:

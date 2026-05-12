@@ -102,8 +102,14 @@ class SkillRegistry:
 
             self._client = client
 
-            # Fetch all skill names
-            skill_names = await client.list_skills()
+            # Fetch all skill names. The task runner usually calls
+            # list_skills() before planning, so reuse that result to avoid a
+            # second WebSocket round-trip during adapter initialization.
+            cached_skill_names = getattr(client, "_cached_skill_names", None)
+            if force_refresh or not isinstance(cached_skill_names, list) or not cached_skill_names:
+                skill_names = await client.list_skills()
+            else:
+                skill_names = list(cached_skill_names)
             if not skill_names:
                 raise RuntimeError(
                     "No skills available from Blender. Is the addon loaded?"

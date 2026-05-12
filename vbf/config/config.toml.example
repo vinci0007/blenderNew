@@ -32,12 +32,36 @@ base_url = "https://api.openai.com/v1"
 api_key = "YOUR_API_KEY"
 # 用于规划和需求评估的模型名称
 model = "gpt-4o-mini"
+# Endpoint protocol.
+# - chat: legacy OpenAI-compatible /chat/completions wire protocol. Uses chat_completions_path.
+# - openai_responses: OpenAI-compatible Responses wire protocol. Uses responses_path.
+# - claude_responses: Anthropic/Claude-compatible Messages wire protocol. Uses responses_path.
+api_protocol = "openai_responses"
+# API Key 鉴权请求头方案。用于控制兼容 Anthropic messages 协议 API 的模型平台，
+# 例如 LongCat 等要求 Bearer 鉴权、而不是 Anthropic 原生 x-api-key 的网关。
+# 配置项及作用：
+# - auto: preserve protocol defaults; claude_responses uses x-api-key, others use Bearer.
+# - bearer: send Authorization: Bearer <api_key>.
+# - x-api-key: send x-api-key: <api_key>.
+# 后续如果发现还有类似平台或特殊鉴权约定，在这里补充说明并显式设置该值。
+auth_scheme = "auto"
 # LLM 采样温度，规划任务建议较低以提升稳定性
 temperature = 0.2
-# 聊天补全接口路径，代理服务不同时可调整
+# 聊天补全接口路径，仅 api_protocol="chat" 时使用
 chat_completions_path = "/v1/chat/completions"
-# 是否使用代理 API。启用后会兼容部分代理服务差异
-is_proxy_api = false
+# Response-style endpoint path, used when api_protocol="openai_responses" or "claude_responses".
+# OpenAI Responses: "/v1/responses" (or "/responses" if base_url already ends with /v1).
+# Claude/Anthropic Messages compatible gateways: "/v1/messages" (or "/messages").
+responses_path = "/v1/responses"
+# Enable proxy compatibility strategies for relay gateways that are not fully
+# faithful to the official OpenAI/Anthropic wire schemas. `api_protocol` remains
+# the endpoint-shape selector:
+# - openai_responses: send OpenAI Responses-shaped requests to responses_path.
+# - claude_responses: send Anthropic Messages-shaped requests to responses_path.
+# The adapter normalizes both response shapes back to VBF's internal chat form.
+# OpenAI Responses proxy mode also folds system/developer instructions into the
+# first user input for gateways that reject native system roles.
+enable_proxy_compatibility_mode = false
 # 是否发送 request_headers 中定义的额外请求头
 enable_extra_request_headers = false
 # 是否启用 curl 风格 HTTP 兼容模式，用于部分代理或网关
@@ -50,6 +74,18 @@ allow_low_level_gateway = false
 auto_allow_low_level_gateway = true
 # 是否使用函数调用能力。auto 表示由适配器和模型能力自动决定
 use_function_calling = "auto"
+# Local VBF budget for progressive-disclosure load_skill calls in one planning request.
+# This is not a provider/LLM hard limit. When exhausted, VBF preserves structured
+# tool history and asks for the final plan with tools disabled for that local retry.
+max_tool_calls = 40
+# If the model repeatedly returns only load_skill/tool calls and no plan text,
+# VBF asks for a final tools-off JSON plan before the full tool budget is spent.
+max_consecutive_tool_only_rounds = 2
+# Planning tool mode. `schema` exposes a bounded subset of registered Blender
+# skill signatures as planning-only function tools. Tool calls are converted to
+# normal plan steps and are not executed directly during LLM planning.
+planning_tool_mode = "schema" # schema|doc_only
+planning_skill_tool_limit = 32
 # 是否优先使用流式响应。auto 表示先探测，支持时使用，不支持时降级非流式
 use_streaming = "auto"
 # 规划模式。adaptive_staged 会按需求阶段拆分规划
@@ -73,6 +109,25 @@ allow_full_skill_fallback = false
 include_compact_schema_for_required = true
 # 是否为高风险技能包含紧凑参数 schema，减少参数名错误
 include_compact_schema_for_high_risk = true
+
+[llm.planning_loop]
+# full_plan keeps legacy behavior.
+# batched splits complex multi-stage plans into smaller validated batches before execution.
+# agent_loop plans one batch, executes it, then plans the next batch from current scene state.
+mode = "full_plan"
+max_steps_per_batch = 12
+max_batches_per_stage = 8
+batch_quality_gate = "auto" # off|auto|always
+batch_quality_threshold = 0.4
+batch_warning_accept_threshold = 0.6
+batch_quality_max_repairs_per_batch = 2
+batch_quality_max_total_repairs = 16
+batch_quality_gate_every_n_batches = 3
+batch_quality_gate_on_stage_transition = true
+batch_quality_gate_on_empty_progress = true
+batch_quality_gate_on_step_warning = true
+save_partial_plan = true
+resume_partial_response = true
 
 # 正式规划前的用户需求阶段评估
 [llm.requirement_assessment]
@@ -99,6 +154,17 @@ enabled = true
 timeout_seconds = 20
 # 能力探测结果缓存时间，单位秒
 cache_ttl_seconds = 3600
+
+[llm.runtime]
+# Timeout for one Blender skill execution JSON-RPC call. The same value can be
+# overridden per run with VBF_EXECUTE_SKILL_TIMEOUT_SECONDS.
+execute_skill_timeout_seconds = 60
+# Wait for Blender's executor queue to become idle before enqueueing a new skill.
+# This prevents timed-out/resumed runs from piling duplicate requests into Blender.
+executor_backpressure_enabled = true
+# Maximum wait before enqueueing a new skill while another skill is running or
+# queued. Does not interrupt the current Blender operation.
+executor_ready_timeout_seconds = 120
 
 # LLM API 限流与重试配置
 [llm.llm_api_throttling]

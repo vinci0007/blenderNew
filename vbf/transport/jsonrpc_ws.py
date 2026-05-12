@@ -47,6 +47,29 @@ class JsonRpcWebSocketClient:
             await self._ws.close()
         self._ws = None
 
+    async def _drop_connection_after_timeout(self, request_id: int) -> None:
+        """Close the transport after a timed-out RPC to avoid late response reuse."""
+        self._pending.pop(request_id, None)
+        for pending_id, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(
+                    TimeoutError(
+                        "JSON-RPC connection reset after another request timed out"
+                    )
+                )
+            self._pending.pop(pending_id, None)
+        recv_task = self._recv_task
+        self._recv_task = None
+        if recv_task:
+            recv_task.cancel()
+        ws = self._ws
+        self._ws = None
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
     async def call(self, method: str, params: Optional[Dict[str, Any]] = None, timeout_s: float = 60.0) -> Any:
         await self.connect()
         async with self._lock:
@@ -68,6 +91,11 @@ class JsonRpcWebSocketClient:
         try:
             resp = await asyncio.wait_for(fut, timeout=timeout_s)
             return resp
+        except TimeoutError:
+            await self._drop_connection_after_timeout(request_id)
+            raise TimeoutError(
+                f"JSON-RPC call timed out: method={method} timeout={timeout_s:.1f}s"
+            ) from None
         finally:
             self._pending.pop(request_id, None)
 
@@ -102,4 +130,3 @@ class JsonRpcWebSocketClient:
                 if not fut.done():
                     fut.set_exception(ConnectionError("WebSocket recv loop crashed"))
             self._pending.clear()
-

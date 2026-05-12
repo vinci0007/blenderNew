@@ -235,7 +235,10 @@ def test_load_openai_compat_config_reads_request_headers():
                     "base_url": "https://example.test",
                     "api_key": "key",
                     "model": "m1",
-                    "is_proxy_api": True,
+                    "api_protocol": "openai_responses",
+                    "auth_scheme": "bearer",
+                    "responses_path": "/v1/responses",
+                    "enable_proxy_compatibility_mode": True,
                     "enable_extra_request_headers": True,
                     "use_curl_http_compat": True,
                     "llm_api_throttling": {
@@ -253,6 +256,10 @@ def test_load_openai_compat_config_reads_request_headers():
         loaded = load_openai_compat_config(str(cfg))
 
         assert loaded is not None
+        assert loaded.api_protocol == "openai_responses"
+        assert loaded.auth_scheme == "bearer"
+        assert loaded.responses_path == "/v1/responses"
+        assert loaded.enable_proxy_compatibility_mode is True
         assert loaded.use_curl_http_compat is True
         assert loaded.http_timeout_seconds == 123
         assert loaded.request_headers == {
@@ -272,7 +279,7 @@ def test_load_openai_compat_config_ignores_invalid_request_headers():
                     "base_url": "https://example.test",
                     "api_key": "key",
                     "model": "m1",
-                    "is_proxy_api": True,
+                    "enable_proxy_compatibility_mode": True,
                     "enable_extra_request_headers": True,
                     "request_headers": ["bad"],
                 },
@@ -296,7 +303,7 @@ def test_load_openai_compat_config_ignores_request_headers_when_disabled():
                     "base_url": "https://example.test",
                     "api_key": "key",
                     "model": "m1",
-                    "is_proxy_api": True,
+                    "enable_proxy_compatibility_mode": True,
                     "enable_extra_request_headers": False,
                     "request_headers": {
                         "User-Agent": "curl/8.8.0",
@@ -322,7 +329,7 @@ def test_load_openai_compat_config_filters_reserved_request_headers():
                     "base_url": "https://example.test",
                     "api_key": "key",
                     "model": "m1",
-                    "is_proxy_api": True,
+                    "enable_proxy_compatibility_mode": True,
                     "enable_extra_request_headers": True,
                     "request_headers": {
                         "Authorization": "blocked",

@@ -107,6 +107,35 @@ def get_planning_context(load_llm_section_fn: Any) -> Dict[str, Any]:
     return ctx
 
 
+def default_planning_loop_config() -> Dict[str, Any]:
+    return {
+        "mode": "full_plan",
+        "max_steps_per_batch": 12,
+        "max_batches_per_stage": 8,
+        "agent_loop_execute_between_batches": True,
+        "batch_quality_gate": "auto",
+        "batch_quality_threshold": 0.4,
+        "batch_warning_accept_threshold": 0.6,
+        "batch_quality_gate_every_n_batches": 3,
+        "batch_quality_gate_on_stage_transition": True,
+        "batch_quality_gate_on_empty_progress": True,
+        "batch_quality_gate_on_step_warning": True,
+        "save_partial_plan": True,
+        "resume_partial_response": True,
+    }
+
+
+def get_planning_loop_config(load_llm_section_fn: Any) -> Dict[str, Any]:
+    cfg = default_planning_loop_config()
+    try:
+        raw_cfg = load_llm_section_fn().get("planning_loop", {})
+    except Exception:
+        raw_cfg = {}
+    if isinstance(raw_cfg, dict):
+        cfg.update(raw_cfg)
+    return cfg
+
+
 def default_requirement_assessment_config() -> Dict[str, Any]:
     return {
         "mode": "auto",

@@ -14,6 +14,9 @@ class _DummyScene:
     def to_prompt_text(self):
         return "Scene: Test"
 
+    def get_objects(self):
+        return self._objects
+
 
 class _FakeLoop:
     def __init__(self, *args, **kwargs):
@@ -53,6 +56,11 @@ async def test_run_task_with_feedback_interrupts_on_repeated_replan_fingerprint(
     monkeypatch.setattr(
         client,
         "_plan_skill_task",
+        AsyncMock(return_value=(initial_plan, initial_steps)),
+    )
+    monkeypatch.setattr(
+        client,
+        "_plan_skill_task_auto",
         AsyncMock(return_value=(initial_plan, initial_steps)),
     )
 

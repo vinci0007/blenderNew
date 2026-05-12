@@ -28,6 +28,13 @@ This keeps the workflow inspectable, resumable, and much easier to debug than di
 
 ## Recent Updates
 
+- Added `auth_scheme` for Anthropic Messages-compatible gateways that require Bearer authentication, including LongCat.
+- Added Blender executor health recovery for stale app-timer polling without interrupting a skill that is already running.
+- Added client-side executor backpressure so timed-out or resumed tasks do not keep stacking duplicate `execute_skill` requests.
+- Added stale queued-job skipping so old, not-yet-started skill calls cannot modify the scene after the client has disconnected or timed out.
+- Added stage-aware batch quality repair so future-stage gaps are deferred as pending work instead of trapping the current stage in repeated replans.
+- Added repair-plan safeguards so batch cleanup cannot delete established parent/control objects that later steps still reference.
+- Added multimodal planning input through `--image`, allowing reference images to be sent to vision-capable LLMs together with the text prompt.
 - Added task-scoped logging with short task IDs such as `task_0426-151232_43b4d1a8`.
 - Added per-task transcript logs that mirror all console stdout/stderr without truncating terminal output.
 - Added a daily plain-text run event log plus a separate per-task result JSON snapshot.
@@ -92,6 +99,8 @@ base_url = "https://api.openai.com/v1"
 api_key = "YOUR_API_KEY"
 model = "gpt-4o-mini"
 temperature = 0.2
+api_protocol = "openai_responses"
+auth_scheme = "auto"
 planning_mode = "adaptive_staged"
 
 [llm.planning_context]
@@ -107,6 +116,11 @@ prefer_geometry_for_simple_model_requests = true
 enabled = true
 timeout_seconds = 20
 cache_ttl_seconds = 3600
+
+[llm.runtime]
+execute_skill_timeout_seconds = 60
+executor_backpressure_enabled = true
+executor_ready_timeout_seconds = 120
 
 [llm.llm_api_throttling]
 max_concurrent_calls = 3
@@ -131,7 +145,10 @@ If you want VBF to auto-launch Blender headlessly, make sure Blender is on `PATH
 uv run python -m vbf --prompt "create a retro radio"
 uv run python -m vbf --prompt-file assets/prompt_test.md
 uv run python -m vbf --prompt "create a smartphone" --style hard_surface_realistic
+uv run python -m vbf --prompt "model this chair as a Blender asset" --image assets/reference_chair.png
 ```
+
+Pass `--image` multiple times to provide several visual references. Images are embedded as data URLs and forwarded to the configured LLM protocol when the selected model/provider supports vision input.
 
 ### 5. Resume a saved task
 
@@ -172,7 +189,39 @@ VBF uses a single OpenAI-compatible integration path for multiple providers and 
 - Ollama
 - custom OpenAI-compatible gateways
 
-Provider behavior can be tuned through `base_url`, `chat_completions_path`, proxy flags, extra request headers, and capability probes in `config.toml`.
+Provider behavior can be tuned through `base_url`, `api_protocol`, `chat_completions_path`, `responses_path`, proxy flags, extra request headers, authentication scheme, and capability probes in `config.toml`.
+
+For Anthropic Messages-compatible gateways, keep the wire protocol and authentication scheme separate. For example, LongCat's Anthropic-compatible endpoint should use a Messages request body while sending Bearer authentication:
+
+```toml
+[llm]
+base_url = "https://api.longcat.chat/anthropic/v1"
+api_protocol = "claude_responses"
+responses_path = "/messages"
+auth_scheme = "bearer"
+model = "LongCat-2.0-Preview"
+```
+
+Use `auth_scheme = "auto"` for normal defaults, `auth_scheme = "bearer"` for `Authorization: Bearer <api_key>`, and `auth_scheme = "x-api-key"` for Anthropic-native style API-key headers.
+
+## Blender Executor Health
+
+Skill execution is queued into Blender and consumed on Blender's main thread by an app timer. VBF now reports executor health through `vbf.executor_status` and can recover a stale poll loop without interrupting an active Blender operation.
+
+The safe recovery rule is conservative:
+
+- if `current_job` is present, VBF waits and does not interrupt it
+- if `queue_size > 0`, `current_job` is empty, and `last_poll_age_s` is stale, VBF can re-register the app timer
+- queued jobs that have not started are skipped when the client has disconnected or their queue deadline expired
+
+Runtime knobs live under `[llm.runtime]`:
+
+```toml
+[llm.runtime]
+execute_skill_timeout_seconds = 60
+executor_backpressure_enabled = true
+executor_ready_timeout_seconds = 120
+```
 
 ## Runtime Files
 
@@ -229,8 +278,10 @@ python -m pytest tests/task_tmp/test_example.py -q
 | Issue | What to check |
 |---|---|
 | Blender connection fails | Confirm the addon is running and the WebSocket endpoint is available |
-| Health check says running but tasks still hang | Restart the addon and verify the WebSocket + JSON-RPC probe succeeds |
+| Health check says running but tasks still hang | Check `vbf.executor_status`; if `queue_size > 0`, `current_job=null`, and `last_poll_age_s` is high, update/reload the addon so executor auto-recovery can re-register the app timer |
 | LLM config not loading | Use `vbf/config/config.toml`, not legacy JSON config files |
+| LongCat returns `401 missing_api_key` on `/anthropic/v1/messages` | Keep `api_protocol = "claude_responses"` and set `auth_scheme = "bearer"` so VBF sends `Authorization: Bearer <api_key>` |
+| A task times out but Blender later changes the scene | Update/reload the addon; stale not-yet-started queued jobs now carry deadlines and are skipped if the client disconnects before execution |
 | A new task keeps mentioning old unrelated objects | Keep `[project.scene].task_scene_policy = "isolate"` so only task-relevant objects are sent into planning/feedback context |
 | Simple prompts lose explicit colors/materials/render intent | Requirement assessment is LLM-first; keep `llm.requirement_assessment.prefer_geometry_for_simple_model_requests = true` as advisory evidence, not as a hard local override |
 | Analyzer reports `LLM parse error` | Check `vbf/cache/last_gen_fail.txt`; recent versions repair simple missing JSON closers and recover partial quality fields before falling back to manual inspection |
