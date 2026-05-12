@@ -1,12 +1,16 @@
 import ast
 import html
 import re
+import zipfile
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS_IMPL = ROOT / "blender_provider" / "vbf_addon" / "skills_impl"
 API_REF = ROOT / "reference" / "blender_python_reference_5_1"
+API_REF_ZIP = ROOT / "reference" / "blender_python_reference_5_1.zip"
 
 
 def _call_name(node: ast.AST) -> str | None:
@@ -43,10 +47,29 @@ def _strip_tags(value: str) -> str:
 
 def _parse_operator_docs() -> dict[str, set[str]]:
     docs = {}
-    for path in sorted(API_REF.glob("bpy.ops.*.html")):
-        text = path.read_text(encoding="utf-8", errors="ignore")
+    html_sources = []
+    if API_REF.exists():
+        html_sources.extend(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in sorted(API_REF.glob("bpy.ops.*.html"))
+        )
+    elif API_REF_ZIP.exists():
+        with zipfile.ZipFile(API_REF_ZIP) as archive:
+            for name in sorted(archive.namelist()):
+                if Path(name).name.startswith("bpy.ops.") and name.endswith(".html"):
+                    html_sources.append(
+                        archive.read(name).decode("utf-8", errors="ignore")
+                    )
+
+    if not html_sources:
+        pytest.skip(
+            "Blender 5.1 API reference is not available locally; "
+            "download/extract reference/blender_python_reference_5_1 to run this compatibility check"
+        )
+
+    for text in html_sources:
         for match in re.finditer(
-            r'<dt class="sig sig-object py" id="(bpy\.ops\.[^"]+)">(.*?)</dt>',
+            r'<dt\b[^>]*\bid="(bpy\.ops\.[^"]+)"[^>]*>(.*?)</dt>',
             text,
             flags=re.S,
         ):
